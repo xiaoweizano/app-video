@@ -1,0 +1,20 @@
+# Gradle / JVM
+.gradle/
+build/
+*/build/
+.kotlin/
+
+# Android
+.idea/
+*.iml
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# 本仓库的 SDD 工作区（scratch，不进版本库）
+.superpowers/
+
+# 平台
+.DS_Store
+Thumbs.db

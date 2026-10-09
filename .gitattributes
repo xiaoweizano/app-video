@@ -1,0 +1,11 @@
+# 本机 core.autocrlf=true：不钉死 eol 的话，重新检出会让 gradlew 变成 CRLF，
+# 在 Git Bash 下报 "bad interpreter: /bin/sh^M"，直接跑不起来。
+* text=auto
+gradlew text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+
+# 密文 fixture：git 通常能靠 NUL 字节判出二进制，但显式钉死更安全
+*.bin binary
+*.jar binary
+*.png binary
