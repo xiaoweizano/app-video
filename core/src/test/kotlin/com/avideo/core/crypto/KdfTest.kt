@@ -39,11 +39,38 @@ class KdfTest {
             deriver.derive("pw".toCharArray(), salt, params.copy(parallelism = params.parallelism + 1))))
     }
 
+    /**
+     * 参数必须真的按 (t, m, p) 传进 Argon2，而不是传错位置。
+     * 「两次派生结果不同」抓不住 t/p 互换——互换后 (t=1,p=2) 与 (t=2,p=1) 依然互不相等。
+     * 所以这里用**独立的第二实现**（BouncyCastle 纯 Java）算出标准答案再比对，
+     * 参数取不对称的 t=2 / p=3：换位置会让两个实现当场分家。
+     * 这是 Task 10 跨平台 fixture 的先行版（那里用生产参数 + 提交进仓库的密文）。
+     */
+    @Test
+    fun `parameter order matches an independent implementation`() {
+        val asymmetric = KdfParams(memoryKib = 8 * 1024, iterations = 2, parallelism = 3)
+        val generator = org.bouncycastle.crypto.generators.Argon2BytesGenerator()
+        generator.init(
+            org.bouncycastle.crypto.params.Argon2Parameters.Builder(
+                org.bouncycastle.crypto.params.Argon2Parameters.ARGON2_id,
+            )
+                .withSalt(salt)
+                .withIterations(asymmetric.iterations)
+                .withMemoryAsKB(asymmetric.memoryKib)
+                .withParallelism(asymmetric.parallelism)
+                .withVersion(org.bouncycastle.crypto.params.Argon2Parameters.ARGON2_VERSION_13)
+                .build(),
+        )
+        val expected = ByteArray(32)
+        generator.generateBytes("pw".toByteArray(Charsets.UTF_8), expected)
+        assertContentEquals(expected, deriver.derive("pw".toCharArray(), salt, asymmetric))
+    }
+
     /** spec: vault-crypto「NFC 与 NFD 形式的同一密码产出同一密钥」。 */
     @Test
     fun `nfc and nfd forms of the same password derive the same key`() {
         val nfc = "é"            // é 预组合
-        val nfd = "é"           // e + combining acute
+        val nfd = "e\u0301"           // e + combining acute
         assertContentEquals(
             deriver.derive(("caf" + nfc).toCharArray(), salt, params),
             deriver.derive(("caf" + nfd).toCharArray(), salt, params),
@@ -84,8 +111,12 @@ class KdfTest {
                 return ByteArray(32)
             }
         }
-        MasterKeyDeriver(spy).derive("café".toCharArray(), salt, params)
-        assertEquals(listOf(PasswordNormalizer.nfc("café")), received)
+        // 必须喂 **NFD** 形式。若喂进去的本来就是 NFC，断言两边恒等，
+        // 这条测试就抓不到「MasterKeyDeriver 忘了规范化」—— 而它守的正是这件事。
+        val nfd = "e\u0301"                 // e + combining acute，即 NFD（用转义，不用裸组合字符）
+        assertTrue(nfd != PasswordNormalizer.nfc(nfd), "测试输入本身必须是非 NFC 形式")
+        MasterKeyDeriver(spy).derive(nfd.toCharArray(), salt, params)
+        assertEquals(listOf(PasswordNormalizer.nfc(nfd)), received)
     }
 
     @Test
