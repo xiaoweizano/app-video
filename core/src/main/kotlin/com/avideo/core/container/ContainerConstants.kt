@@ -51,6 +51,15 @@ object ContainerConstants {
     /** flags 保留位，本阶段必须为 0（BOUNDARIES.md Q16）。 */
     const val FLAGS_RESERVED: Byte = 0x00
 
-    /** 显示名可用字节数 = 预留区 − 固定字段（1024 时为 979）。 */
-    fun maxDisplayNameBytes(metadataLen: Int): Int = metadataLen - METADATA_FIXED_FIELDS_LEN
+    /**
+     * 显示名可用字节数 = 预留区 − 固定字段（1024 时为 979）。
+     * MUST NOT 为负：预留区连固定字段都装不下时，截断循环永远终止不了
+     * （max < 0 时连空名字都满足不了 `bytes.size <= max`）。
+     */
+    fun maxDisplayNameBytes(metadataLen: Int): Int {
+        require(metadataLen >= METADATA_FIXED_FIELDS_LEN) {
+            "metadata reserve $metadataLen is smaller than the fixed fields ($METADATA_FIXED_FIELDS_LEN)"
+        }
+        return metadataLen - METADATA_FIXED_FIELDS_LEN
+    }
 }
