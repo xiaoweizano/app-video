@@ -31,7 +31,12 @@ class EncryptedFileWriter(
 
     init {
         require(masterKey.size == ContainerConstants.KEYS_LEN) { "master key must be ${ContainerConstants.KEYS_LEN} bytes" }
-        require(metadataLen > 0) { "metadata length must be positive" }
+        require(metadataLen >= ContainerConstants.METADATA_FIXED_FIELDS_LEN) {
+            "metadata reserve $metadataLen is smaller than the fixed fields"
+        }
+        require(metadataLen <= FixedHeader.MAX_METADATA_LEN) {
+            "metadata reserve $metadataLen exceeds the supported maximum"
+        }
     }
 
     private val digest: MessageDigest = MessageDigest.getInstance("SHA-256")

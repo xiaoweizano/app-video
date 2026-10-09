@@ -3,6 +3,7 @@ package com.avideo.core.container
 import com.avideo.core.DeterministicRandomSource
 import com.avideo.core.RecordingChannel
 import com.avideo.core.SimulatedCrashError
+import com.avideo.core.crypto.KeyWrapping
 import com.avideo.core.errors.EmptySourceError
 import com.avideo.core.indexOf
 import com.avideo.core.patternBytes
@@ -147,12 +148,44 @@ class EncryptedFileWriterTest {
         // 能按修正后的长度读回来，见 Task 8 的 `metadata is readable after commit`
     }
 
+    /**
+     * commit 重写头部后，**重算过的 header_tag 必须能用该文件的 data key 验证通过**。
+     * 这是唯一能在 writer 侧证明「修正分支没有退回占位头」的检查：
+     * 退回的话 header_tag 是用旧头字节算的，这里就会验不过。
+     */
     @Test
-    fun `plaintext len zero is representable`() {
-        assertEquals(
-            OffsetMapping.dataStart(1024),
-            OffsetMapping.expectedFileSize(0L, 1024),
-        )
+    fun `the rewritten header authenticates with its own data key`() {
+        val plaintext = patternBytes(p + 5)
+        val file = File(dir, "rewrite-tag.bin")
+        EncryptedFileWriter(
+            FileContainerChannel.openForWrite(file),
+            masterKey,
+            ContainerConstants.METADATA_LEN,
+            DeterministicRandomSource(seed = 1),
+        ).use {
+            it.writeFrom(ByteArrayInputStream(plaintext), "被修正.mp4", 12L)   // 声明值与实读值不同
+        }
+
+        val headerBytes = ByteArray(ContainerConstants.FIXED_HEADER_LEN)
+        FileContainerChannel.openForRead(file).use { channel ->
+            assertEquals(headerBytes.size, channel.readAt(0L, headerBytes, headerBytes.size))
+            val header = FixedHeader.decode(headerBytes)
+            assertEquals(plaintext.size.toLong(), header.plaintextLen, "头部没有按实读长度修正")
+
+            val tag = ByteArray(ContainerConstants.HEADER_TAG_LEN)
+            assertEquals(
+                tag.size,
+                channel.readAt(OffsetMapping.HEADER_TAG_OFFSET, tag, tag.size),
+            )
+
+            // 用主密钥解出该文件的 data key，再用它验头部 tag
+            val dataKey = KeyWrapping.unwrap(masterKey, header.wrappedFileKey)
+            try {
+                Aead.verifyTagOnly(dataKey, Nonce.header(header.baseNonce), headerBytes, tag)
+            } finally {
+                java.util.Arrays.fill(dataKey, 0)
+            }
+        }
     }
 
     /** spec: import-commit-protocol「占位后未提交」。 */
@@ -244,22 +277,20 @@ class EncryptedFileWriterTest {
     }
 
     /**
-     * design.md D3：`metadata_len` 不是格式冻结项。写一个 4096 的文件，
-     * 断言偏移确实按**头部里那个数**走。用 reader 解回来的那半在 Task 8。
+     * design.md D3：`metadata_len` 不是格式冻结项。这里用**非 1024** 的预留区写出一个文件，
+     * 断言落盘尺寸、头部里记的数、以及数据区随预留区平移的量三者一致。
+     * 三条断言都落在 writer 的实际输出上，任何一条都不会因为「只算纯函数」而恒真。
      */
     @Test
     fun `a non default metadata length is written consistently`() {
-        val plaintext = patternBytes(p + 9)
-        val (file, _) = writeFile(plaintext, metadataLen = 4096)
-        assertEquals(4096, readHeader(file).metadataLen)
-        assertEquals(OffsetMapping.expectedFileSize(plaintext.size.toLong(), 4096), file.length())
+        val len = 4096
+        val plaintext = patternBytes(p + 9)          // 跨 2 块，尾块变长
+        val (file, _) = writeFile(plaintext, metadataLen = len)
+        assertEquals(len, readHeader(file).metadataLen)
+        assertEquals(OffsetMapping.expectedFileSize(plaintext.size.toLong(), len), file.length())
         // data_start 随 metadata_len 平移：4096 比 1024 多 3072 字节。
-        // 从预期文件大小里减掉数据区密文（p + 9 明文 → 两块，每块各带 16 字节 tag）
-        // 剩下的就是 data_start。
-        assertEquals(
-            OffsetMapping.dataStart(1024) + 3072,
-            OffsetMapping.expectedFileSize(plaintext.size.toLong(), 4096) - (p + 9 + 32),
-        )
+        assertEquals(3072, OffsetMapping.dataStart(len) - OffsetMapping.dataStart(1024))
+        // 用 reader 解回来的那半在 Task 8 的同一测试名下
     }
 
     @Test
@@ -281,6 +312,42 @@ class EncryptedFileWriterTest {
         writer.writeChunk(patternBytes(17), 17)
         assertFailsWith<IllegalStateException> { writer.writeChunk(patternBytes(17), 17) }
         writer.close()
+    }
+
+    /**
+     * 预留区必须落在 [METADATA_FIXED_FIELDS_LEN, MAX_METADATA_LEN]：
+     * 太小装不下固定字段、太大超过头部能表达且自己分类为 MALFORMED 的上界。
+     * 两者都 MUST 在构造时就拒绝，而不是等到写入阶段才炸。
+     */
+    @Test
+    fun `metadata length outside the supported range is refused at construction`() {
+        val small = FileContainerChannel.openForWrite(File(dir, "metadata-too-small.bin"))
+        try {
+            assertFailsWith<IllegalArgumentException> {
+                EncryptedFileWriter(
+                    small,
+                    masterKey,
+                    ContainerConstants.METADATA_FIXED_FIELDS_LEN - 1,
+                    DeterministicRandomSource(seed = 1),
+                )
+            }
+        } finally {
+            small.close()
+        }
+
+        val large = FileContainerChannel.openForWrite(File(dir, "metadata-too-large.bin"))
+        try {
+            assertFailsWith<IllegalArgumentException> {
+                EncryptedFileWriter(
+                    large,
+                    masterKey,
+                    FixedHeader.MAX_METADATA_LEN + 1,
+                    DeterministicRandomSource(seed = 1),
+                )
+            }
+        } finally {
+            large.close()
+        }
     }
 
     // --- 小工具 -------------------------------------------------------------
