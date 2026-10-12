@@ -279,6 +279,43 @@ class EncryptedFileWriterTest {
         assertEquals(1024, body.length)
     }
 
+    /**
+     * **A6：正文与 tag 之间 MUST 有一次落盘屏障。**
+     * `force(false)`（即 [ContainerChannel.flush]）不保证页的写回顺序，断电可能让 tag 先持久化
+     * —— 那时 tag 非零（读者判「已提交」）而正文还是占位/半个，`real_len` 读出 0。
+     * 屏障**不**改变提交点：提交点仍然是写 tag 那一次写，屏障只是保证 tag 落盘前正文已经落盘。
+     * 顺序必须是：正文 → flush → tag → flush。
+     */
+    @Test
+    fun `commit flushes the metadata body before writing the tag`() {
+        val plaintext = patternBytes(p + 1)
+        val file = File(dir, "flush-barrier.bin")
+        val recording = RecordingChannel(FileContainerChannel.openForWrite(file))
+        EncryptedFileWriter(recording, masterKey, 1024, DeterministicRandomSource(seed = 1)).use {
+            it.writeFrom(ByteArrayInputStream(plaintext), "flush.mp4", plaintext.size.toLong())
+        }
+
+        val tail = recording.events.takeLast(4)
+        assertEquals(4, tail.size, "写入序列比预期短：$tail")
+        assertEquals(
+            RecordingChannel.Event.Write(RecordingChannel.WriteCall(OffsetMapping.METADATA_OFFSET, 1024)),
+            tail[0],
+            "倒数第 4 次事件应当是 metadata 正文",
+        )
+        assertEquals(
+            RecordingChannel.Event.Flush,
+            tail[1],
+            "写 tag 之前没有落盘屏障：断电可能让非零 tag 先于正文持久化",
+        )
+        assertEquals(
+            RecordingChannel.Event.Write(
+                RecordingChannel.WriteCall(OffsetMapping.metadataTagOffset(1024), ContainerConstants.METADATA_TAG_LEN),
+            ),
+            tail[2],
+        )
+        assertEquals(RecordingChannel.Event.Flush, tail[3])
+    }
+
     /** spec: import-commit-protocol「写到一半被杀」——正文写完但 tag 未写。 */
     @Test
     fun `crash after the commit body leaves the file uncommitted, never corrupted`() {
@@ -395,6 +432,40 @@ class EncryptedFileWriterTest {
             }
         } finally {
             large.close()
+        }
+    }
+
+    /**
+     * **M-1：`MAX_METADATA_LEN` 不得超过两个 16 位字段能表达的范围。**
+     * `real_len` 与 `name_len` 各占 2 字节（`FileMetadata.encode` 用 `toShort()` 写），
+     * 预留区开到 65536 以上时，长显示名会在这两个字段处**回绕**，产出一个
+     * 「自洽但错误」的 payload —— 不报错，只是名字与长度已经是别的东西。
+     *
+     * 因此上界必须正好是 `0xFFFF`，且**最大预留区必须能原样往返一个最长显示名**
+     * （65535 − 45 = 65490 字节）。这条断言是「上界取值正确」的唯一端到端证明。
+     */
+    @Test
+    fun `the largest accepted metadata reserve round trips the longest display name`() {
+        assertEquals(0xFFFF, FixedHeader.MAX_METADATA_LEN, "上界必须是 16 位字段能表达的最大值")
+
+        val reserve = FixedHeader.MAX_METADATA_LEN
+        val longestName = "n".repeat(reserve)          // 一定超过 maxDisplayNameBytes(reserve)
+        val file = File(dir, "max-reserve.bin")
+        EncryptedFileWriter(
+            FileContainerChannel.openForWrite(file),
+            masterKey,
+            reserve,
+            DeterministicRandomSource(seed = 1),
+        ).use { it.writeFrom(ByteArrayInputStream(patternBytes(4096)), longestName, 4096L) }
+
+        assertEquals(reserve, readHeader(file).metadataLen)
+        EncryptedFileReader.open(FileContainerChannel.openForRead(file), masterKey).use { reader ->
+            assertEquals(
+                ContainerConstants.maxDisplayNameBytes(reserve),
+                reader.metadata.displayName.toByteArray(Charsets.UTF_8).size,
+                "最长显示名没有原样往返（real_len/name_len 在 16 位字段处回绕了）",
+            )
+            assertContentEquals(patternBytes(4096), reader.read(0L, 4096))
         }
     }
 

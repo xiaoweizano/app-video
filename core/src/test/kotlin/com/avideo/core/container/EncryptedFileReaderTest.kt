@@ -7,6 +7,8 @@ import com.avideo.core.errors.MetadataAuthenticationFailedError
 import com.avideo.core.errors.RangeOutOfBoundsError
 import com.avideo.core.errors.TruncatedContainerError
 import com.avideo.core.errors.UncommittedFileError
+import com.avideo.core.errors.VaultError
+import com.avideo.core.interruptedPlaceholder
 import com.avideo.core.patternBytes
 import com.avideo.core.tempDir
 import java.io.ByteArrayInputStream
@@ -14,6 +16,7 @@ import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import kotlin.test.assertFailsWith
 
@@ -186,6 +189,30 @@ class EncryptedFileReaderTest {
         }
     }
 
+    /**
+     * **M-2：越界**消息本身**也不能溢出。** 这个错误存在的理由就是
+     * `read(Long.MAX_VALUE, 1)` 这类输入，而旧消息用 `offset + length` 拼终点 ——
+     * 那条输入会渲染成 `range [9223372036854775807, -9223372036854775808)`：
+     * 把一个「越界」说成了一个诡异的负数区间，比不报还糟。
+     *
+     * 终点可计算时 MUST 照常报出终点（防溢出不是把信息删掉），不可计算时才退化成显示长度。
+     */
+    @Test
+    fun `the out of bounds message cannot overflow`() {
+        val file = write(patternBytes(1000))
+        open(file).use { reader ->
+            assertEquals(
+                "range [9223372036854775807, +1) is outside [0, 1000)",
+                assertFailsWith<RangeOutOfBoundsError> { reader.read(Long.MAX_VALUE, 1) }.message,
+            )
+            // 终点可算的普通越界：仍然报终点
+            assertEquals(
+                "range [1000, 1001) is outside [0, 1000)",
+                assertFailsWith<RangeOutOfBoundsError> { reader.read(1000L, 1) }.message,
+            )
+        }
+    }
+
     /** Review Focus 第 4 条：截断必须当场判定。 */
     @Test
     fun `truncated file is detected`() {
@@ -315,6 +342,35 @@ class EncryptedFileReaderTest {
         // 而不是 KeyUnwrapFailedError —— 把②挪到③之后，这一条立刻变红。
         assertFailsWith<UncommittedFileError> {
             EncryptedFileReader.open(FileContainerChannel.openForRead(file), ByteArray(32) { 0x77 })
+        }
+    }
+
+    /**
+     * 「写占位写到一半被杀」的文件 MUST 报 `UncommittedFileError`，MUST NOT 报 `TruncatedContainerError`。
+     * 后者进入列表会降级成 `VaultEntry.Corrupted` —— 把一次中断的导入显示成「仓库损坏」，
+     * 正是 spec: import-commit-protocol「未提交文件的恢复」明令 MUST NOT 的事。
+     *
+     * 判据：81 ≤ size < `dataStart(metadata_len)` 时固定头读得出来、`metadata_len` 已知，
+     * 而已提交的容器至少有 `dataStart` 字节，所以它**不可能**是已提交容器 ⇒ 未提交。
+     * 两种中间态（97 / 1121 字节）都覆盖，且都用错的主密钥再问一次：判据必须在解包之前。
+     */
+    @Test
+    fun `a placeholder interrupted mid write is uncommitted, not truncated`() {
+        val dataStart = OffsetMapping.dataStart(ContainerConstants.METADATA_LEN)
+        for (afterWrites in 1..2) {
+            val file = interruptedPlaceholder(File(dir, "interrupted-$afterWrites.bin"), masterKey, afterWrites)
+            assertTrue(
+                file.length() < dataStart,
+                "中间态没造出来：期望 < $dataStart 字节，实际 ${file.length()}",
+            )
+            val thrown = assertFailsWith<VaultError> { open(file) }
+            assertIs<UncommittedFileError>(
+                thrown,
+                "中间态被判成了 ${thrown.javaClass.simpleName}（截断/损坏），而不是未提交",
+            )
+            assertFailsWith<UncommittedFileError> {
+                EncryptedFileReader.open(FileContainerChannel.openForRead(file), ByteArray(32) { 0x11 })
+            }
         }
     }
 

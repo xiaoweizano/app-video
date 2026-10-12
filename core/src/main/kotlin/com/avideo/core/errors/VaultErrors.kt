@@ -46,7 +46,19 @@ class UncommittedFileError : VaultError("container is not committed")
 
 /** 明文区间越界。 */
 class RangeOutOfBoundsError(val offset: Long, val length: Int, val plaintextLength: Long) :
-    VaultError("range [$offset, ${offset + length}) is outside [0, $plaintextLength)")
+    VaultError(rangeOutOfBoundsMessage(offset, length, plaintextLength))
+
+/**
+ * 拼越界消息。**MUST NOT 用 `offset + length` 拼终点**：`read(Long.MAX_VALUE, 1)` 正是这个错误
+ * 存在的理由，那个加法在那里回绕成负数，消息会渲染成 `[...807, -...808)`——
+ * 把「越界」说成一个诡异的负数区间，比不报还糟。
+ * 终点可计算时照常报终点，不可计算（会溢出 / 长度为负）时才退化成报长度。
+ */
+private fun rangeOutOfBoundsMessage(offset: Long, length: Int, plaintextLength: Long): String {
+    val end = if (length >= 0 && offset <= Long.MAX_VALUE - length) offset + length else null
+    val shown = if (end == null) "[$offset, +$length)" else "[$offset, $end)"
+    return "range $shown is outside [0, $plaintextLength)"
+}
 
 /** 源流为空：导入流程直接拒绝 0 字节文件。 */
 class EmptySourceError : VaultError("source stream is empty")

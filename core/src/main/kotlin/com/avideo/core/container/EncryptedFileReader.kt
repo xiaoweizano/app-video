@@ -16,7 +16,9 @@ import javax.crypto.AEADBadTagException
  *
  * 打开时的校验链（顺序是规格的一部分）：
  *   ① 读固定头 → 结构校验（magic / version / metadata_len 合理性）
- *   ② 读 metadata_tag；**全零 ⇒ 未提交**（无需密码，也不必解包）
+ *   ② 读 metadata_tag；**全零 ⇒ 未提交**（无需密码，也不必解包）。
+ *      位置读不到 tag 时分两种：文件短到不可能是已提交容器（`size < dataStart(metadata_len)`）
+ *      ⇒ 同样是**未提交**（写占位写到一半被杀）；长度够却读不满 ⇒ 截断。
  *   ③ 解 wrapped_file_key（自认证）→ data key
  *   ④ 用 data key 验 header_tag
  *   ⑤ 验 + 解 metadata 区 → FileMetadata
@@ -117,7 +119,8 @@ class EncryptedFileReader private constructor(
          * 成功后由返回实例的 `close()` 关闭，失败时由本方法自己关闭（否则调用方在
          * 「扫一遍满是损坏文件的目录」这条路径上会一条一个 fd 泄漏到 GC）。
          *
-         * @throws UncommittedFileError 未提交（metadata_tag 全零，或 real_len == 0）
+         * @throws UncommittedFileError 未提交（metadata_tag 全零、real_len == 0，或文件短到
+         *   不可能是已提交容器 —— 占位的写入中途被杀，见校验链 ②）
          * @throws KeyUnwrapFailedError 主密钥不对，或 wrapped_file_key 被篡改
          * @throws HeaderAuthenticationFailedError 固定头被篡改
          * @throws MetadataAuthenticationFailedError metadata 区被篡改
@@ -140,6 +143,15 @@ class EncryptedFileReader private constructor(
                 val tagOffset = OffsetMapping.metadataTagOffset(header.metadataLen)
                 val tag = ByteArray(ContainerConstants.METADATA_TAG_LEN)
                 if (channel.readAt(tagOffset, tag, tag.size) != tag.size) {
+                    // 读不满 tag 的位置有两种可能，MUST 分开判：
+                    //   · 81 ≤ size < dataStart(metadata_len)：固定头已解析、metadata_len 已知，
+                    //     而已提交的容器至少有 dataStart 字节 ⇒ 它不可能是已提交容器。
+                    //     这就是「写占位写到一半被杀」留下的中间态（97 / 1121 字节），
+                    //     判**未提交**——spec 的 MUST NOT：中断的导入不得被判为「仓库损坏」。
+                    //   · 长度够却读不满：真的短读，按截断处理（MUST NOT 当成完整文件）。
+                    if (channel.size() < OffsetMapping.dataStart(header.metadataLen)) {
+                        throw UncommittedFileError()
+                    }
                     throw TruncatedContainerError(tagOffset + tag.size, channel.size())
                 }
                 if (tag.all { it == 0.toByte() }) throw UncommittedFileError()

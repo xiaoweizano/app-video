@@ -87,8 +87,14 @@ class FixedHeader(
         const val OFF_PLAINTEXT_LEN = 69
         const val OFF_METADATA_LEN = 77
 
-        /** metadata 预留区的合理性上界：超过它一定是结构损坏而不是「预留区调大了」。 */
-        const val MAX_METADATA_LEN = 1 shl 20
+        /**
+         * metadata 预留区的合理性上界：超过它一定是结构损坏，而不是「预留区调大了」。
+         *
+         * 取值来自格式本身，不是拍脑袋的 1 MiB：`real_len` / `name_len` 是 16 位字段
+         * （见 [ContainerConstants.METADATA_LEN_MAX]），预留区超过 0xFFFF 时，
+         * 长显示名会在写 short 时回绕成「自洽但错误」的 payload。
+         */
+        const val MAX_METADATA_LEN = ContainerConstants.METADATA_LEN_MAX
 
         fun decode(bytes: ByteArray): FixedHeader {
             if (bytes.size != ContainerConstants.FIXED_HEADER_LEN) {

@@ -143,6 +143,10 @@ class EncryptedFileWriter(
 
         // 正文在前、tag 在后 —— 顺序是规格要求（见类注释）。tag 这一次写就是提交点。
         channel.writeAt(OffsetMapping.METADATA_OFFSET, sealed, metadataLen)
+        // 落盘**屏障**，不是正确性：force(false) 不保证页的写回顺序，断电可能让 tag 先持久化，
+        // 留下一个「tag 非零（判已提交）、正文却还是占位（real_len == 0）」的文件。
+        // 提交点仍然是下面写 tag 那一次写，这里的 flush 只是保证它落盘时正文已经落盘。
+        channel.flush()
         channel.writeAt(OffsetMapping.metadataTagOffset(metadataLen), metadataTag, metadataTag.size)
         channel.flush()
 

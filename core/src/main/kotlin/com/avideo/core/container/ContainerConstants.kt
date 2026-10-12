@@ -33,6 +33,15 @@ object ContainerConstants {
     /** Q10：定长预留区。可调，但**不是**格式冻结项——读者永远从文件头读这个数。 */
     const val METADATA_LEN = 1024
 
+    /**
+     * metadata 预留区的**上界** = `real_len` 与 `name_len` 两个 16 位字段能表达的最大值。
+     *
+     * 预留区超过它，长显示名会在 `FileMetadata.encode` 的 `toShort()` 处回绕，
+     * 写出一个**自洽但错误**的 payload（不报错，名字与长度已经是别的值）。
+     * 因为 `real_len = 45 + name_len ≤ metadata_len`，正确的上界就是 0xFFFF。
+     */
+    const val METADATA_LEN_MAX = 0xFFFF
+
     /** 明文块 = 1 MiB − tag。 */
     const val CHUNK_STRIDE = 1_048_576
     const val CHUNK_PLAINTEXT = CHUNK_STRIDE - AEAD_TAG_LEN
