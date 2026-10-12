@@ -9,3 +9,7 @@ gradlew text eol=lf
 *.bin binary
 *.jar binary
 *.png binary
+# vault.meta 边车只有 37 字节、NUL 字节很少，二进制嗅探不可靠 —— 显式钉死，
+# 否则一次布局改到不含 NUL，全新检出时会被当文本做 EOL 转换、静默损坏 fixture。
+vault.meta binary
+vault.meta.bak binary

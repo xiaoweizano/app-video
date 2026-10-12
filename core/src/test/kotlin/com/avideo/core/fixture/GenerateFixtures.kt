@@ -36,18 +36,15 @@ object FixtureSpec {
 fun main() {
     val fixturesRoot = File("src/test/resources/fixtures")
     val vaultDir = File(fixturesRoot, "vault")
-    vaultDir.deleteRecursively()
-    File(vaultDir, "data").mkdirs()
 
     val plaintext = FixtureSpec.plaintext()
 
-    // 1) vault.meta：盐由固定种子生成 → 可复现
+    // 1) vault.meta：盐由固定种子生成 → 可复现。先在内存里构造，**不落盘**。
     val meta = VaultMeta(
         version = VaultMeta.VERSION,
         kdfSalt = ByteArray(VaultMeta.SALT_LEN).also { DeterministicRandomSource(FixtureSpec.SALT_SEED).nextBytes(it) },
         kdfParams = FixtureSpec.PARAMS,
     )
-    VaultMetaIO.write(vaultDir, meta)
 
     // 2) 主密钥：由**第二实现**算出并记录 —— fixture 的信任来源
     val masterKey = BouncyCastleKeyDerivation().derive(
@@ -55,11 +52,18 @@ fun main() {
         meta.kdfSalt,
         meta.kdfParams,
     )
-    // 3) 用生产实现再算一次，不一致就直接拒绝生成（生成阶段就把问题暴露出来）
+    // 3) 用生产实现再算一次，不一致就直接拒绝生成（生成阶段就把问题暴露出来）。
+    //    这一步 MUST 在任何写盘/删盘之前：否则 check 失败会留下半成品目录
+    //    （vault.meta 已重写、密文已删、vector.properties 还是上一版），难以诊断。
     val reproduced = MasterKeyDeriver.jvm().derive(FixtureSpec.PASSWORD.toCharArray(), meta.kdfSalt, meta.kdfParams)
     check(masterKey.contentEquals(reproduced)) { "argon2-jvm 与 BouncyCastle 产出了不同的主密钥" }
 
-    // 4) 容器密文：固定随机种子 → 可复现
+    // 4) 校验通过后才动盘。只清本轮产物 vault/（README.md 是手写提交件，不能删）。
+    vaultDir.deleteRecursively()
+    File(vaultDir, "data").mkdirs()
+    VaultMetaIO.write(vaultDir, meta)
+
+    // 5) 容器密文：固定随机种子 → 可复现
     val container = File(vaultDir, "data/${FixtureSpec.UUID}.bin")
     EncryptedFileWriter(
         FileContainerChannel.openForWrite(container),

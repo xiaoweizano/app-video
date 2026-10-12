@@ -20,13 +20,52 @@ v1 没有 iOS App，所以这是「格式可移植」这条约束在 v1 唯一�
 
 ## 复算步骤
 
+### 固定头（81 字节；所有多字节整数**大端序**）
+
+| 偏移 | 宽度 | 字段 |
+|---|---|---|
+| 0 | 4 | `magic` = `AVLT`（字节 `41 56 4C 54`） |
+| 4 | 1 | `version` = `1` |
+| 5 | 60 | `wrapped_file_key` = `nonce(12) ‖ ct(32) ‖ tag(16)` |
+| 65 | 4 | `base_nonce` |
+| 69 | 8 | `plaintext_len` |
+| 77 | 4 | `metadata_len` |
+
+`header_tag(16)` 紧跟在固定头之后（偏移 81）。`metadata_len` 被 `header_tag` 认证，
+本 fixture 恒为 1024，但读者 MUST 从文件头读它，不许硬编码。
+`plaintext_len` **可能**在 commit 阶段被修正过（写入时声明的长度允许不准），
+所以明文长度一律取**头部**里的值，不要相信任何外部记录。
+
+### 派生主密钥
+
 1. 对 `password` 的 Unicode **NFC** 形式做 UTF-8 编码。
-2. Argon2id（版本 1.3 / `0x13`），`m = kdf.m` KiB，`t = kdf.t`，`p = kdf.p`，盐 = `kdf.salt.hex`，输出 32 字节 → `master.key.hex`。
-3. 用主密钥 AES-256-GCM 解 `vault/data/*.bin` 头部的 `wrapped_file_key(60)`（`nonce(12)+ct(32)+tag(16)`，AAD 为空）得到该文件的 data key。
-4. 用 data key 依次校验/解密：`header_tag`(counter 0) → metadata 区(counter 1) → 数据块(counter i+2)。
-   三者的 AAD：前两者 = 固定头 81 字节，数据块 = 空。nonce = `base_nonce(4) || counter(8)`。
-5. 数据区起点 = `113 + metadata_len`；明文块 `P = 1_048_560`，磁盘步长 `1_048_576`，末块变长。
-6. 拼出的明文 SHA-256 必须等于 `plaintext.sha256.hex`，长度等于 `plaintext.length`。
+2. Argon2id（版本 1.3 / `0x13`），`m = kdf.m` KiB，`t = kdf.t`，`p = kdf.p`，
+   盐 = `kdf.salt.hex`，输出 32 字节 → `master.key.hex`。
+
+### 解容器
+
+3. 用主密钥 AES-256-GCM 解 `wrapped_file_key`（AAD 为空）得到该文件的 data key。
+4. `nonce(12)` = `base_nonce(4) ‖ counter(8)`，counter 为大端序。各 counter 的用途与 AAD：
+
+   | counter | 用途 | AAD |
+   |---|---|---|
+   | 0 | `header_tag` | 固定头 81 字节 |
+   | 1 | metadata 区（`metadata_len` 字节密文 + 16 字节 tag） | 固定头 81 字节 |
+   | i+2 | 第 i 个数据块 | **空**（数据块不带 AAD） |
+
+   `header_tag` 与 `metadata_tag` 的 AAD 是**提交时写在盘上**的那 81 字节：
+   若 commit 修正过 `plaintext_len`，头部已被重写，所以要先读盘、再用这份字节当 AAD。
+5. metadata 区的明文结构（未用部分零填充到 `metadata_len`）：
+
+   `real_len(2) ‖ name_len(2) ‖ display_name(NFC UTF-8) ‖ duration_ms(8) ‖ sha256(32) ‖ flags(1)`
+
+   `real_len = 45 + name_len`（45 = 2+2+8+32+1）；`flags` MUST 为 0。
+   磁盘上的 `metadata_tag` 全为 0，或解出的 `real_len == 0`，都表示**未提交**。
+
+### 拼明文
+
+6. 数据区起点 = `113 + metadata_len`；明文块 `P = 1_048_560`，磁盘步长 `1_048_576`，末块变长。
+7. 拼出的明文 SHA-256 必须等于 `plaintext.sha256.hex`，长度等于 `plaintext.length`。
 
 ## 重新生成
 
