@@ -40,7 +40,7 @@ class CrossImplementationFixtureTest {
         )
         val expected = hexToBytes(vector.getProperty("master.key.hex"))
 
-        val fromJvm = MasterKeyDeriver.jvm()
+        val fromJvm = MasterKeyDeriver.forJvmOnly()
             .derive(vector.getProperty("password").toCharArray(), salt, params)
         val fromBouncyCastle = BouncyCastleKeyDerivation()
             .derive(PasswordNormalizer.normalize(vector.getProperty("password").toCharArray()), salt, params)
@@ -65,7 +65,7 @@ class CrossImplementationFixtureTest {
         assertTrue(nfd != vector.getProperty("password"), "fixture 密码本身就是 NFD，这条测试无效")
         assertContentEquals(
             hexToBytes(vector.getProperty("master.key.hex")),
-            MasterKeyDeriver.jvm().derive(nfd.toCharArray(), salt, params),
+            MasterKeyDeriver.forJvmOnly().derive(nfd.toCharArray(), salt, params),
         )
     }
 
@@ -78,7 +78,7 @@ class CrossImplementationFixtureTest {
             iterations = vector.getProperty("kdf.t").toInt(),
             parallelism = vector.getProperty("kdf.p").toInt(),
         )
-        val masterKey = MasterKeyDeriver.jvm()
+        val masterKey = MasterKeyDeriver.forJvmOnly()
             .derive(vector.getProperty("password").toCharArray(), salt, params)
 
         val container = File(root, "vault/${vector.getProperty("container.data.file")}")

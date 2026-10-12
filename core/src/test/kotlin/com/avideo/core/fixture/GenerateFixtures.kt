@@ -55,7 +55,7 @@ fun main() {
     // 3) 用生产实现再算一次，不一致就直接拒绝生成（生成阶段就把问题暴露出来）。
     //    这一步 MUST 在任何写盘/删盘之前：否则 check 失败会留下半成品目录
     //    （vault.meta 已重写、密文已删、vector.properties 还是上一版），难以诊断。
-    val reproduced = MasterKeyDeriver.jvm().derive(FixtureSpec.PASSWORD.toCharArray(), meta.kdfSalt, meta.kdfParams)
+    val reproduced = MasterKeyDeriver.forJvmOnly().derive(FixtureSpec.PASSWORD.toCharArray(), meta.kdfSalt, meta.kdfParams)
     check(masterKey.contentEquals(reproduced)) { "argon2-jvm 与 BouncyCastle 产出了不同的主密钥" }
 
     // 4) 校验通过后才动盘。只清本轮产物 vault/（README.md 是手写提交件，不能删）。

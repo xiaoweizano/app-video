@@ -9,7 +9,7 @@ import kotlin.test.assertTrue
 
 class KdfTest {
 
-    private val deriver = MasterKeyDeriver.jvm()
+    private val deriver = MasterKeyDeriver.forJvmOnly()
     private val salt = ByteArray(16) { it.toByte() }
     private val params = KdfParams.TEST
 

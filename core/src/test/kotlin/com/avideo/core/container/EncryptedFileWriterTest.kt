@@ -123,6 +123,54 @@ class EncryptedFileWriterTest {
         )
     }
 
+    /**
+     * **SAF / `ContentResolver` 的流被明确允许返回短读**，所以「一次 `read` 读不满就是 EOF」
+     * 是错的：`fill` 必须循环到缓冲区满或真的撞到 EOF。
+     *
+     * 这条正是那个退化的守门测试。若 `fill` 退化成单次 `read`，`writeFrom` 会把第一次短读
+     * 当成最后一块、`commit` 出一个**完全合法、内容却被截断**的容器 —— 不报错、不置损坏标志、
+     * 只是少了内容。所以这里既断言头部记的 `plaintext_len`、也断言字节级往返。
+     */
+    @Test
+    fun `a source that returns short reads is not mistaken for EOF`() {
+        val plaintext = patternBytes(2 * p + 123)          // 跨 3 块，强制出现多次部分读
+        val maxPerRead = 4096                             // 远小于块长：必然产生大量短读
+        var eofQueries = 0
+        var delivered = 0L
+        val chunked = object : InputStream() {
+            private val delegate = ByteArrayInputStream(plaintext)
+            override fun read(): Int = delegate.read().also { if (it < 0) eofQueries++ else delivered++ }
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                val n = delegate.read(b, off, minOf(len, maxPerRead))
+                if (n < 0) eofQueries++ else delivered += n
+                return n
+            }
+        }
+
+        val file = File(dir, "short-reads.bin")
+        val metadata = writeSession(file).use {
+            it.writeFrom(chunked, "短读.mp4", plaintext.size.toLong())
+        }
+
+        assertEquals(
+            plaintext.size.toLong(),
+            readHeader(file).plaintextLen,
+            "头部记的长度是截断后的长度：短读被当成了 EOF",
+        )
+        assertEquals(OffsetMapping.expectedFileSize(plaintext.size.toLong(), 1024), file.length())
+        // 源流仍只被完整读一遍：恰好问到一次 EOF，交付的字节数正好是明文长度
+        assertEquals(1, eofQueries, "源流被反复重读（EOF 被问了 $eofQueries 次）")
+        assertEquals(plaintext.size.toLong(), delivered)
+        assertContentEquals(
+            java.security.MessageDigest.getInstance("SHA-256").digest(plaintext),
+            metadata.sha256,
+        )
+        // 字节级往返：截断的话这里会短一截
+        EncryptedFileReader.open(FileContainerChannel.openForRead(file), masterKey).use { reader ->
+            assertContentEquals(plaintext, reader.read(0L, plaintext.size))
+        }
+    }
+
     @Test
     fun `no temporary files are left behind`() {
         val solo = tempDir("avault-solo")

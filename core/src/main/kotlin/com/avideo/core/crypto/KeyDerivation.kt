@@ -5,6 +5,11 @@ package com.avideo.core.crypto
  * 所以这一层必须是接口：JVM 侧用 argon2-jvm，Android 侧 stage-1 再接 argon2kt。
  *
  * 传入的 password MUST 已经是 NFC 形式——由 [MasterKeyDeriver] 保证，不要直接调用本接口。
+ *
+ * **Android MUST NOT 调用 [MasterKeyDeriver.forJvmOnly]**：那个实现依赖 argon2-jvm
+ * （经 JNA 加载原生库），Android 上会构建成功、只在运行时崩。Android 侧 MUST
+ * 自己构造 `MasterKeyDeriver(AndroidKeyDerivation())`（stage-1 接入 argon2kt）。
+ * 接口本身与平台无关，两端 MUST 产出相同的 32 字节（`CrossImplementationFixtureTest` 守住）。
  */
 interface KeyDerivation {
     /** 返回 32 字节主密钥。 */
@@ -28,7 +33,16 @@ class MasterKeyDeriver(private val impl: KeyDerivation) {
     }
 
     companion object {
-        /** 纯 JVM 实现。Android 侧实现（argon2kt）在 stage-1 接入。 */
-        fun jvm(): MasterKeyDeriver = MasterKeyDeriver(JvmKeyDerivation())
+        /**
+         * 纯 JVM 实现（argon2-jvm，经 JNA 加载原生库）。
+         *
+         * **Android MUST NOT 调用本方法。** 它没有任何内部类型出现在签名里，所以 Android 代码
+         * 调它是**编译通过、运行时才崩**（JNA 在 Android 上加载不了原生库）。名字刻意带
+         * `forJvmOnly`，就是为了让误用在阅读与评审阶段就被看见；Android 侧 MUST 改成
+         * `MasterKeyDeriver(AndroidKeyDerivation())`（stage-1）。
+         *
+         * 「把 JNA 的原生库从 APK 里排掉」是 AGP 的事，属于 stage-1，不在本模块处理。
+         */
+        fun forJvmOnly(): MasterKeyDeriver = MasterKeyDeriver(JvmKeyDerivation())
     }
 }

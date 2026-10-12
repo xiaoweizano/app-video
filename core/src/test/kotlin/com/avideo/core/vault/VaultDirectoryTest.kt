@@ -26,7 +26,7 @@ class VaultDirectoryTest {
         val root = File(tempDir(), "vault")
         val directory = VaultDirectory(root)
         val meta = directory.create(params, DeterministicRandomSource(5))
-        val masterKey = MasterKeyDeriver.jvm().derive(password, meta.kdfSalt, meta.kdfParams)
+        val masterKey = MasterKeyDeriver.forJvmOnly().derive(password, meta.kdfSalt, meta.kdfParams)
         return Triple(directory, masterKey, root)
     }
 
@@ -130,7 +130,7 @@ class VaultDirectoryTest {
             RecordingReads(FileContainerChannel.openForRead(file), observed)
         }
         val meta = directory.create(params, DeterministicRandomSource(5))
-        val masterKey = MasterKeyDeriver.jvm().derive(password, meta.kdfSalt, meta.kdfParams)
+        val masterKey = MasterKeyDeriver.forJvmOnly().derive(password, meta.kdfSalt, meta.kdfParams)
         VaultDirectory(root).run {
             repeat(20) { index ->
                 put("00000000-0000-4000-8000-%012d".format(index), masterKey, 3 * ContainerConstants.CHUNK_PLAINTEXT)
@@ -155,7 +155,7 @@ class VaultDirectoryTest {
         val root = File(tempDir(), "vault")
         val seed = VaultDirectory(root)
         val meta = seed.create(params, DeterministicRandomSource(5))
-        val masterKey = MasterKeyDeriver.jvm().derive(password, meta.kdfSalt, meta.kdfParams)
+        val masterKey = MasterKeyDeriver.forJvmOnly().derive(password, meta.kdfSalt, meta.kdfParams)
         seed.put("11111111-1111-4111-8111-111111111111", masterKey, 1000)
         val poisoned = "22222222-2222-4222-8222-222222222222"
         seed.put(poisoned, masterKey, 1000)
