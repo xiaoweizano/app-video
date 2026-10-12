@@ -60,7 +60,8 @@ v1 没有 iOS App，所以这是「格式可移植」这条约束在 v1 唯一�
    `real_len(2) ‖ name_len(2) ‖ display_name(NFC UTF-8) ‖ duration_ms(8) ‖ sha256(32) ‖ flags(1)`
 
    `real_len = 45 + name_len`（45 = 2+2+8+32+1）；`flags` MUST 为 0。
-   磁盘上的 `metadata_tag` 全为 0，或解出的 `real_len == 0`，都表示**未提交**。
+   未提交判定有两条，**以 `metadata_tag` 为准，且 MUST 先判**：磁盘上 `metadata_tag` 全为 0 ⇒ 未提交（**无需密码**）。解出的 `real_len == 0` **只在占位态、已提交态两个稳定态里与之等价**；在「commit 正文已写、tag 未写」的撕裂窗口里，metadata 与 tag 连续读入后 GCM 校验失败、`real_len` **根本读不出来**，此时**只有全零 tag 可判**。所以读取器 MUST 在**解包密钥 / 校验 `header_tag` 之前**先查 `metadata_tag`——否则会把撕裂文件误当成已提交。
+   *（2026-10-12 更正：原文写「`metadata_tag` 全为 0，或解出的 `real_len == 0`，都表示未提交」，用「或」把两条判据说成可互换，会诱使实现把 `real_len == 0` 当主判据。）*
 
 ### 拼明文
 
