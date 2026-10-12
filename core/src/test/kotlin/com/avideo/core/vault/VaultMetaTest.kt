@@ -11,7 +11,6 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
-import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class VaultMetaTest {
@@ -27,10 +26,11 @@ class VaultMetaTest {
     }
 
     @Test
-    fun `round trip keeps salt params and version`() {
+    fun `round trip keeps salt and params`() {
         val original = sample()
         val decoded = VaultMeta.decode(original.encode())
-        assertEquals(original.version, decoded.version)
+        // version 不做往返断言：create 只写 VERSION、decode 又在返回前拒掉任何别的值，
+        // 断言它等于 VERSION 就是拿两个编译期常量互比。真正能变的是盐与参数。
         assertEquals(original.kdfParams, decoded.kdfParams)
         assertContentEquals(original.kdfSalt, decoded.kdfSalt)
     }
@@ -43,7 +43,7 @@ class VaultMetaTest {
         val random = DeterministicRandomSource(11)
         val first = VaultMeta.create(random, params)
         val second = VaultMeta.create(random, params)
-        assert(!first.kdfSalt.contentEquals(second.kdfSalt))
+        assertTrue(!first.kdfSalt.contentEquals(second.kdfSalt))
     }
 
     /** spec: vault-meta「不需要密码即可判损坏」。 */
@@ -57,7 +57,12 @@ class VaultMetaTest {
     @Test
     fun `wrong magic is rejected`() {
         val bytes = sample().encode().also { it[0] = 0x00 }
-        assertFailsWith<VaultMetaFormatError> { VaultMeta.decode(bytes) }
+        // 改 magic 会连带把 crc32 弄坏，那样即使删掉 magic 校验这条测试也照样绿。
+        // 先把校验和按新内容重算回去，确保失败只可能是 magic 这条判据拦下的。
+        val fixed = bytes.copyOf()
+        java.nio.ByteBuffer.wrap(fixed, 33, 4).order(java.nio.ByteOrder.BIG_ENDIAN)
+            .putInt(VaultMeta.crc32Of(fixed.copyOf(33)).toInt())
+        assertFailsWith<VaultMetaFormatError> { VaultMeta.decode(fixed) }
     }
 
     @Test
@@ -95,16 +100,33 @@ class VaultMetaTest {
         assertTrue(differing.count { it in allowed && it < VaultMeta.OFF_PARAMS } >= 14, "盐应当整体参与编码")
     }
 
+    /**
+     * `.bak` MUST 与主文件**逐字节相同**，且读取优先级必须是「主 → 备」。
+     *
+     * 注意这里**不能只断言两个文件都是 37 字节**：那样「备份由另一个 salt 生成」这类
+     * 不再镜像的回归照样全绿（两个文件都是 37 字节），而 `.bak` 一旦偏离就失去了它存在的意义。
+     * 还要单独断言「目录未被动过时 load 必须说 fromBackup=false」——否则
+     * 「把两份**相同**的边车判成 BothValid（叫调用方两个都试）」这种回归也不会被发现。
+     */
     @Test
-    fun `write mirrors to bak and read falls back when the primary is truncated`() {
+    fun `write mirrors bak byte for byte and read prefers the primary`() {
         val dir = tempDir()
-        VaultMetaIO.write(dir, sample())
-        assertEquals(37, File(dir, VaultMetaIO.FILE_NAME).length())
-        assertEquals(37, File(dir, VaultMetaIO.BACKUP_NAME).length())
+        val meta = sample()
+        VaultMetaIO.write(dir, meta)
 
+        val primaryBytes = File(dir, VaultMetaIO.FILE_NAME).readBytes()
+        val backupBytes = File(dir, VaultMetaIO.BACKUP_NAME).readBytes()
+        assertEquals(VaultMeta.ENCODED_LEN, primaryBytes.size)
+        assertContentEquals(primaryBytes, backupBytes)          // 镜像：逐字节相同
+        assertContentEquals(meta.encode(), primaryBytes)        // 而且写进去的就是这份 meta
+
+        // 目录未被动过 → 主文件可用，且必须报 fromBackup=false
+        val untouched = assertIs<VaultMetaIO.LoadResult.Ok>(VaultMetaIO.load(dir))
+        assertEquals(false, untouched.fromBackup)
+
+        // 主文件被截断 → 回退到备份
         File(dir, VaultMetaIO.FILE_NAME).writeBytes(ByteArray(10))
-        val loaded = VaultMetaIO.load(dir)
-        val ok = assertIs<VaultMetaIO.LoadResult.Ok>(loaded)
+        val ok = assertIs<VaultMetaIO.LoadResult.Ok>(VaultMetaIO.load(dir))
         assertEquals(true, ok.fromBackup)
     }
 
@@ -120,8 +142,8 @@ class VaultMetaTest {
         // 「Incompatible types」，而这里要测的正是运行期类型，不是编译期可判定的。
         val corrupted: com.avideo.core.errors.VaultError =
             assertFailsWith<VaultCorruptedError> { VaultMetaIO.loadOrThrow(dir) }
-        assert(corrupted !is com.avideo.core.errors.WrongPasswordError) {
-            "「仓库损坏」与「密码错误」必须是不同类型"
+        assertTrue("「仓库损坏」与「密码错误」必须是不同类型") {
+            corrupted !is com.avideo.core.errors.WrongPasswordError
         }
     }
 
@@ -138,9 +160,11 @@ class VaultMetaTest {
     @Test
     fun `missing bak is tolerated`() {
         val dir = tempDir()
-        VaultMetaIO.write(dir, sample())
+        val meta = sample()
+        VaultMetaIO.write(dir, meta)
         File(dir, VaultMetaIO.BACKUP_NAME).delete()
-        assertNotNull(VaultMetaIO.loadOrThrow(dir))
+        // 断言返回的确实是写进去的那份（而不是「调用没抛异常」——后者靠返回类型非空恒真）
+        assertContentEquals(meta.kdfSalt, VaultMetaIO.loadOrThrow(dir).kdfSalt)
     }
 
     @Test
@@ -163,6 +187,6 @@ class VaultMetaTest {
     @Test
     fun `wrong password error type exists and differs from corrupted`() {
         val wrong: com.avideo.core.errors.VaultError = com.avideo.core.errors.WrongPasswordError()
-        assert(wrong !is VaultCorruptedError)
+        assertTrue(wrong !is VaultCorruptedError)
     }
 }

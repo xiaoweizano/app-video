@@ -145,6 +145,34 @@ class VaultDirectoryTest {
         )
     }
 
+    /**
+     * 单条目在**打开阶段**抛 I/O 异常（文件在枚举与打开之间被删/被占用）时，
+     * MUST 只把这一条降级为损坏，MUST NOT 让整个列表失败。
+     * 这条断言钉住的是 `list` 里「open 必须在 try 内」+「IOException 与 VaultError 一起兜住」。
+     */
+    @Test
+    fun `an entry whose channel fails to open degrades to corrupted without failing the listing`() {
+        val root = File(tempDir(), "vault")
+        val seed = VaultDirectory(root)
+        val meta = seed.create(params, DeterministicRandomSource(5))
+        val masterKey = MasterKeyDeriver.jvm().derive(password, meta.kdfSalt, meta.kdfParams)
+        seed.put("11111111-1111-4111-8111-111111111111", masterKey, 1000)
+        val poisoned = "22222222-2222-4222-8222-222222222222"
+        seed.put(poisoned, masterKey, 1000)
+
+        val listing = VaultDirectory(root) { file ->
+            if (file.name.startsWith(poisoned)) throw java.io.IOException("file vanished")
+            FileContainerChannel.openForRead(file)
+        }.list(masterKey)
+
+        assertEquals(2, listing.size)
+        assertEquals(1, listing.count { it is VaultEntry.Committed })
+        val corrupted = assertIs<VaultEntry.Corrupted>(listing.single { it is VaultEntry.Corrupted })
+        assertEquals(poisoned, corrupted.uuid)
+        // reason 只含错误类型名，不含 message（message 里可能带路径）
+        assertEquals("IOException", corrupted.reason)
+    }
+
     private class RecordingReads(
         private val delegate: ContainerChannel,
         private val observed: MutableList<Pair<Long, Int>>,

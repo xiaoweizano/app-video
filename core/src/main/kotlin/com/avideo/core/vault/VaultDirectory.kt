@@ -11,6 +11,7 @@ import com.avideo.core.crypto.RandomSource
 import com.avideo.core.errors.UncommittedFileError
 import com.avideo.core.errors.VaultError
 import java.io.File
+import java.io.IOException
 
 /**
  * 仓库目录：
@@ -62,9 +63,12 @@ class VaultDirectory(
      */
     fun list(masterKey: ByteArray): List<VaultEntry> = cipherFiles().mapNotNull { file ->
         val uuid = file.name.removeSuffix(SUFFIX)
-        val channel = channelFactory(file)
         var reader: EncryptedFileReader? = null
+        var channel: ContainerChannel? = null
         try {
+            // open 必须在 try 内：文件可能在 cipherFiles() 与打开之间被删/被占用（TOCTOU），
+            // 那种 I/O 失败只该让这一条降级，不该让整个列表失败。
+            channel = channelFactory(file)
             reader = EncryptedFileReader.open(channel, masterKey)
             VaultEntry.Committed(uuid, file, reader.metadata)
         } catch (e: UncommittedFileError) {
@@ -72,8 +76,15 @@ class VaultDirectory(
         } catch (e: VaultError) {
             // 只带错误类型名，不带任何路径/文件名之外的敏感信息
             VaultEntry.Corrupted(uuid, file, e.javaClass.simpleName)
+        } catch (e: IOException) {
+            // 读取期间的 I/O 失败（文件消失、被占用等）：同样只降级这一条。
+            // 不放宽到 Exception：那会把编程错误也伪装成「损坏」，掩盖真正的 bug。
+            VaultEntry.Corrupted(uuid, file, e.javaClass.simpleName)
         } finally {
-            if (reader != null) reader.close() else channel.close()
+            when {
+                reader != null -> reader.close()
+                channel != null -> channel.close()
+            }
         }
     }
 
