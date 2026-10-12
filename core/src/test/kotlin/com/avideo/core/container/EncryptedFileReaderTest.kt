@@ -164,6 +164,28 @@ class EncryptedFileReaderTest {
         }
     }
 
+    /**
+     * 越界判据 MUST NOT 依赖 `offset + len`：那个加法在 `offset > Long.MAX_VALUE - len` 时溢出成负数，
+     * 于是「越界」被算成「越界内」，一路走到 `ByteArray(sealedLen)` 抛
+     * `NegativeArraySizeException` / `IndexOutOfBoundsException` —— 都不是 [VaultError] 家族。
+     *
+     * 偏移来自外部输入（stage-2 的 Range 请求要能对越界返回 416），所以这必须是一条干净的区间错误。
+     */
+    @Test
+    fun `an offset that would overflow the bounds check is still a clean range error`() {
+        val plaintext = patternBytes(1000)
+        val file = write(plaintext)
+        open(file).use { reader ->
+            // `Long.MAX_VALUE + 1` 回绕成负数，旧的 `offset + len > plaintextLength` 判据抓不住
+            assertFailsWith<RangeOutOfBoundsError> { reader.read(Long.MAX_VALUE, 1) }
+            assertFailsWith<RangeOutOfBoundsError> { reader.read(Long.MAX_VALUE - 3, 8) }
+            // offset 恰好等于末尾、len > 0：减法形式下 `plaintextLength - offset == 0`，必须判越界
+            assertFailsWith<RangeOutOfBoundsError> { reader.read(1000L, 1) }
+            // 末尾的**空**读取仍必须成功（减法形式不该把它误判成越界）
+            assertEquals(0, reader.read(1000L, 0).size)
+        }
+    }
+
     /** Review Focus 第 4 条：截断必须当场判定。 */
     @Test
     fun `truncated file is detected`() {
@@ -214,6 +236,38 @@ class EncryptedFileReaderTest {
         assertFailsWith<KeyUnwrapFailedError> {
             EncryptedFileReader.open(FileContainerChannel.openForRead(file), wrong)
         }
+    }
+
+    /**
+     * 「主密钥不对」是**最常见**的失败路径（用户输错一次密码，就要扫过仓库里每一个文件）。
+     * 它必须和别的失败一样归还 channel —— 否则一次错密码就是一次全库 fd 泄漏。
+     * 这条钉的是「整段 open 都在同一个 try 里」，而不是只把解包之后的半段包起来。
+     */
+    @Test
+    fun `a failed unwrap releases the channel too`() {
+        val file = write(patternBytes(4096))
+        val channel = CountingChannel(FileContainerChannel.openForRead(file))
+        assertFailsWith<KeyUnwrapFailedError> {
+            EncryptedFileReader.open(channel, ByteArray(32) { 0x55 })
+        }
+        assertTrue(channel.closed, "主密钥不对时 channel 未被归还（最常见的失败路径在漏 fd）")
+    }
+
+    /**
+     * 未提交判据也在同一 try 里：命中它时同样必须归还 channel。
+     * 恢复流程会扫出所有未提交文件，这条路径的调用次数不比正常路径少。
+     */
+    @Test
+    fun `an uncommitted file releases the channel too`() {
+        val file = File(dir, "uncommitted-channel.bin")
+        val writer = EncryptedFileWriter(FileContainerChannel.openForWrite(file), masterKey, 1024, DeterministicRandomSource(3))
+        writer.writePlaceholder(5000L)
+        writer.writeChunk(patternBytes(1000), 1000)
+        writer.close()
+
+        val channel = CountingChannel(FileContainerChannel.openForRead(file))
+        assertFailsWith<UncommittedFileError> { EncryptedFileReader.open(channel, masterKey) }
+        assertTrue(channel.closed, "未提交文件被拒时 channel 未被归还")
     }
 
     @Test
@@ -287,4 +341,59 @@ class EncryptedFileReaderTest {
         open(file).use { it.read(p.toLong() + 3, 4096) }
         assertContentEquals(before, file.readBytes(), "读取路径改动了磁盘内容")
     }
+
+    /**
+     * `open` 在解包出 data key **之后**若因 I/O 失败中止，MUST 关掉调用方交进来的 channel
+     * （open 成功时它的 close() 就会关，失败时不能例外，否则扫一遍满是损坏文件的目录
+     * 会一条一个 fd 泄漏到 GC），并且 MUST 让原始异常原样传播、不被吞掉或换成别的类型。
+     *
+     * 这里的替身在第 4 次 readAt（⑤ 读 metadata 区）抛 IOException —— 那一次调用发生在
+     * ③ 解包之后，恰好落在「已经持有 data key」的窗口里。同时这条也覆盖了
+     * 「单条 catch-all 同时负责清 key 与关 channel」这个结构。
+     */
+    @Test
+    fun `a failing open closes the channel and propagates the io error`() {
+        val file = write(patternBytes(4096))
+
+        // 先数出一次成功 open 会做几次 readAt，确认第 4 次确实落在解包之后。
+        val probe = CountingChannel(FileContainerChannel.openForRead(file))
+        EncryptedFileReader.open(probe, masterKey).close()
+        assertTrue(probe.reads >= 4, "open 应当至少读 4 次（头/tag/header tag/metadata），实际 ${probe.reads}")
+
+        val failing = ThrowingChannel(FileContainerChannel.openForRead(file), failAtRead = 3)
+        assertFailsWith<java.io.IOException> { EncryptedFileReader.open(failing, masterKey) }
+        assertTrue(failing.closed, "open 失败后 channel 未被关闭（fd 泄漏）")
+    }
+}
+
+/** 数 readAt 次数、记录 close 是否被调用，其余转发给 delegate。 */
+private class CountingChannel(private val delegate: ContainerChannel) : ContainerChannel {
+    var reads = 0
+    var closed = false
+    override fun writeAt(offset: Long, src: ByteArray, length: Int) = delegate.writeAt(offset, src, length)
+    override fun readAt(offset: Long, dst: ByteArray, length: Int): Int {
+        reads++
+        return delegate.readAt(offset, dst, length)
+    }
+    override fun size(): Long = delegate.size()
+    override fun flush() = delegate.flush()
+    override fun close() { closed = true; delegate.close() }
+}
+
+/** 在第 [failAtRead] 次 readAt 上抛 IOException，并记录 close 是否被调用。 */
+private class ThrowingChannel(
+    private val delegate: ContainerChannel,
+    private val failAtRead: Int,
+) : ContainerChannel {
+    var reads = 0
+    var closed = false
+    override fun writeAt(offset: Long, src: ByteArray, length: Int) = delegate.writeAt(offset, src, length)
+    override fun readAt(offset: Long, dst: ByteArray, length: Int): Int {
+        if (reads == failAtRead) throw java.io.IOException("simulated storage failure")
+        reads++
+        return delegate.readAt(offset, dst, length)
+    }
+    override fun size(): Long = delegate.size()
+    override fun flush() = delegate.flush()
+    override fun close() { closed = true; delegate.close() }
 }

@@ -48,7 +48,11 @@ class EncryptedFileReader private constructor(
     fun read(offset: Long, len: Int): ByteArray {
         check(!closed) { "reader is closed" }
         require(len >= 0) { "length must be non-negative" }
-        if (offset < 0 || offset + len > plaintextLength) {
+        // 判据 MUST NOT 用 `offset + len`：offset 来自外部输入（stage-2 的 Range 头），
+        // `offset > Long.MAX_VALUE - len` 时那个加法溢出成负数，越界会被算成越界内，
+        // 一路走到 ByteArray(sealedLen) 抛 NegativeArraySizeException —— 不是 VaultError 家族。
+        // 先判 `offset > plaintextLength`，后面的减法就非负、不可能溢出。
+        if (offset < 0 || offset > plaintextLength || len > plaintextLength - offset) {
             throw RangeOutOfBoundsError(offset, len, plaintextLength)
         }
         val out = ByteArray(len)
@@ -72,6 +76,9 @@ class EncryptedFileReader private constructor(
                 (plaintextLength - chunkStart).toInt()
             }
             val take = minOf(len - written, chunkPlaintextLen - withinChunk)
+            // 上面的越界判据保证 cursor < plaintextLength，所以 take 恒 > 0。
+            // 这条是**守卫**：将来若有人放宽那个判据，这里要炸得响亮，而不是死循环挂住。
+            check(take > 0) { "range read made no progress at offset $cursor" }
             val sealedLen = chunkPlaintextLen + ContainerConstants.AEAD_TAG_LEN
             val diskOffset = OffsetMapping.diskOffset(chunkStart, metadataLen)
             val sealed = ByteArray(sealedLen)
@@ -106,6 +113,10 @@ class EncryptedFileReader private constructor(
         private val EMPTY_AAD = ByteArray(0)
 
         /**
+         * 打开一个密文文件。[open] 在**成功与失败两种情况下都取得 channel 的所有权**：
+         * 成功后由返回实例的 `close()` 关闭，失败时由本方法自己关闭（否则调用方在
+         * 「扫一遍满是损坏文件的目录」这条路径上会一条一个 fd 泄漏到 GC）。
+         *
          * @throws UncommittedFileError 未提交（metadata_tag 全零，或 real_len == 0）
          * @throws KeyUnwrapFailedError 主密钥不对，或 wrapped_file_key 被篡改
          * @throws HeaderAuthenticationFailedError 固定头被篡改
@@ -113,81 +124,79 @@ class EncryptedFileReader private constructor(
          * @throws TruncatedContainerError 文件被截断
          */
         fun open(channel: ContainerChannel, masterKey: ByteArray): EncryptedFileReader {
-            val headerBytes = ByteArray(ContainerConstants.FIXED_HEADER_LEN)
-            if (channel.readAt(0L, headerBytes, headerBytes.size) != headerBytes.size) {
-                throw TruncatedContainerError(
-                    ContainerConstants.FIXED_HEADER_LEN.toLong(),
-                    channel.size(),
-                )
-            }
-            val header = FixedHeader.decode(headerBytes)
-
-            // ② 未提交判据（不需要密钥）
-            val tagOffset = OffsetMapping.metadataTagOffset(header.metadataLen)
-            val tag = ByteArray(ContainerConstants.METADATA_TAG_LEN)
-            if (channel.readAt(tagOffset, tag, tag.size) != tag.size) {
-                throw TruncatedContainerError(tagOffset + tag.size, channel.size())
-            }
-            if (tag.all { it == 0.toByte() }) throw UncommittedFileError()
-
-            // ③ data key（自认证）
-            val dataKey = KeyWrapping.unwrap(masterKey, header.wrappedFileKey)
-
-            // ④ 头部完整性（tag 在固定头之后，固定偏移 81）
-            val headerTag = ByteArray(ContainerConstants.HEADER_TAG_LEN)
-            if (channel.readAt(OffsetMapping.HEADER_TAG_OFFSET, headerTag, headerTag.size) != headerTag.size) {
-                PasswordNormalizer.wipe(dataKey)
-                throw TruncatedContainerError(
-                    OffsetMapping.HEADER_TAG_OFFSET + headerTag.size,
-                    channel.size(),
-                )
-            }
+            // 解包出密钥后才有东西要清零；在那之前它一直是 null。
+            var dataKey: ByteArray? = null
             try {
-                Aead.verifyTagOnly(dataKey, Nonce.header(header.baseNonce), headerBytes, headerTag)
-            } catch (e: AEADBadTagException) {
-                PasswordNormalizer.wipe(dataKey)
-                throw HeaderAuthenticationFailedError(cause = e)
-            }
+                val headerBytes = ByteArray(ContainerConstants.FIXED_HEADER_LEN)
+                if (channel.readAt(0L, headerBytes, headerBytes.size) != headerBytes.size) {
+                    throw TruncatedContainerError(
+                        ContainerConstants.FIXED_HEADER_LEN.toLong(),
+                        channel.size(),
+                    )
+                }
+                val header = FixedHeader.decode(headerBytes)
 
-            // ⑤ metadata 区
-            val sealed = ByteArray(header.metadataLen + ContainerConstants.METADATA_TAG_LEN)
-            if (channel.readAt(OffsetMapping.METADATA_OFFSET, sealed, sealed.size) != sealed.size) {
-                PasswordNormalizer.wipe(dataKey)
-                throw TruncatedContainerError(
-                    OffsetMapping.dataStart(header.metadataLen),
-                    channel.size(),
-                )
-            }
-            val metadataPlaintext = try {
-                Aead.open(dataKey, Nonce.metadata(header.baseNonce), headerBytes, sealed)
-            } catch (e: AEADBadTagException) {
-                PasswordNormalizer.wipe(dataKey)
-                throw MetadataAuthenticationFailedError(cause = e)
-            }
-            val metadata = try {
-                FileMetadata.decode(metadataPlaintext)
-            } catch (e: Exception) {
+                // ② 未提交判据（不需要密钥）
+                val tagOffset = OffsetMapping.metadataTagOffset(header.metadataLen)
+                val tag = ByteArray(ContainerConstants.METADATA_TAG_LEN)
+                if (channel.readAt(tagOffset, tag, tag.size) != tag.size) {
+                    throw TruncatedContainerError(tagOffset + tag.size, channel.size())
+                }
+                if (tag.all { it == 0.toByte() }) throw UncommittedFileError()
+
+                // ③ data key（自认证）
+                val key = KeyWrapping.unwrap(masterKey, header.wrappedFileKey)
+                dataKey = key
+
+                // ④ 头部完整性：tag 紧跟在固定头之后（偏移 81）。
+                // 这一次读**必然读满**：② 已经在 97 + metadataLen ≥ 98 处成功读满 16 字节，
+                // 所以 81..97 一定存在，读不满的分支不可达，不留死代码。
+                val headerTag = ByteArray(ContainerConstants.HEADER_TAG_LEN)
+                channel.readAt(OffsetMapping.HEADER_TAG_OFFSET, headerTag, headerTag.size)
+                try {
+                    Aead.verifyTagOnly(key, Nonce.header(header.baseNonce), headerBytes, headerTag)
+                } catch (e: AEADBadTagException) {
+                    throw HeaderAuthenticationFailedError(cause = e)
+                }
+
+                // ⑤ metadata 区
+                val sealed = ByteArray(header.metadataLen + ContainerConstants.METADATA_TAG_LEN)
+                if (channel.readAt(OffsetMapping.METADATA_OFFSET, sealed, sealed.size) != sealed.size) {
+                    throw TruncatedContainerError(
+                        OffsetMapping.dataStart(header.metadataLen),
+                        channel.size(),
+                    )
+                }
+                val metadataPlaintext = try {
+                    Aead.open(key, Nonce.metadata(header.baseNonce), headerBytes, sealed)
+                } catch (e: AEADBadTagException) {
+                    throw MetadataAuthenticationFailedError(cause = e)
+                }
                 // 含 UncommittedFileError（real_len == 0，带密码时的第二条判据）与结构错误。
-                PasswordNormalizer.wipe(dataKey)
-                throw e
-            }
+                val metadata = FileMetadata.decode(metadataPlaintext)
 
-            // ⑥ 拖尾长度可判定
-            val expected = OffsetMapping.expectedFileSize(header.plaintextLen, header.metadataLen)
-            val actual = channel.size()
-            if (actual < expected) {
-                PasswordNormalizer.wipe(dataKey)
-                throw TruncatedContainerError(expected, actual)
-            }
+                // ⑥ 拖尾长度可判定
+                val expected = OffsetMapping.expectedFileSize(header.plaintextLen, header.metadataLen)
+                val actual = channel.size()
+                if (actual < expected) throw TruncatedContainerError(expected, actual)
 
-            return EncryptedFileReader(
-                channel = channel,
-                metadataLen = header.metadataLen,
-                baseNonce = header.baseNonce,
-                dataKey = dataKey,
-                plaintextLength = header.plaintextLen,
-                metadata = metadata,
-            )
+                return EncryptedFileReader(
+                    channel = channel,
+                    metadataLen = header.metadataLen,
+                    baseNonce = header.baseNonce,
+                    dataKey = key,
+                    plaintextLength = header.plaintextLen,
+                    metadata = metadata,
+                )
+            } catch (t: Throwable) {
+                // 单一失败路径：有 key 就清零，然后归还 channel，最后让原始异常原样传播
+                // （MUST NOT 把 AEADBadTagException 之类的 JCE 异常漏出去，上面已逐个翻译好）。
+                // 整段都在 try 里，所以「主密钥不对」这条最常见的失败路径也走这里，
+                // 不会成为漏网的 fd。
+                if (dataKey != null) PasswordNormalizer.wipe(dataKey)
+                runCatching { channel.close() }
+                throw t
+            }
         }
     }
 }
