@@ -81,12 +81,13 @@ class FileMetadata(
             val nameBytes = effective.displayName.toByteArray(Charsets.UTF_8)
             val realLen = ContainerConstants.METADATA_FIXED_FIELDS_LEN + nameBytes.size
             require(realLen <= metadataLen) { "metadata payload $realLen does not fit in $metadataLen" }
+            // real_len / name_len 是 16 位字段：超过 0xFFFF 时 toShort() 会回绕，
+            // 写出来的是一个「自洽但错误」的 payload（解码出来是另一个长度/名字）。
+            // 上界在写入前就拒绝，而不是让坏数据落盘。
             require(realLen <= ContainerConstants.METADATA_LEN_MAX) {
                 "metadata payload $realLen does not fit in a 16-bit real_len " +
                     "(max ${ContainerConstants.METADATA_LEN_MAX})"
-            }            // real_len / name_len 是 16 位字段：超过 0xFFFF 时 toShort() 会回绕，
-            // 写出来的是一个「自洽但错误」的 payload（解码出来是另一个长度/名字）。
-            // 上界在写入前就拒绝，而不是让坏数据落盘。
+            }
 
             val out = ByteArray(metadataLen)
             val bb = ByteBuffer.wrap(out).order(ByteOrder.BIG_ENDIAN)
