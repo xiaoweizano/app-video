@@ -43,6 +43,9 @@ android {
     }
     buildFeatures {
         compose = true
+        // AGP 8.x 起不再默认生成 BuildConfig，而 PlayerScreen 用它决定是否加 FLAG_SECURE
+        // （现逻辑：`if (BuildConfig.DEBUG == false)` —— 即只在 release 构建里加，debug 下便于排查）。
+        buildConfig = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.8"

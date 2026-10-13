@@ -2,4 +2,7 @@
 <resources>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+
+    <!-- 自适应图标的背景色（mipmap-*/ic_launcher.xml 引用它）。取 DESIGN.md 的暗色主背景。 -->
+    <color name="ic_launcher_background">#FF0D0D0D</color>
 </resources>

@@ -40,7 +40,25 @@ jobs:
       # 真正的目的：验证 libVLC 能不能被打进 APK（OV-9 称这是零经验者真正的第一道坎：
       # AAR 100+ MB、多 ABI、extractNativeLibs、16 KB page size、.so 冲突）。
       - name: Assemble debug APK
-        run: ./gradlew :app:assembleDebug --console=plain --stacktrace
+        run: |
+          set -o pipefail
+          ./gradlew :app:assembleDebug --console=plain --stacktrace 2>&1 | tee /tmp/build.log
+
+      # 失败时把编译器错误逐条转成 GitHub 注解。
+      # 为什么这么做：job 日志的 API 需要认证，而注解不需要 —— 这样"哪一行编译不过"在公开仓库上
+      # 可以被匿名读到，省掉"人肉复制日志"的来回。
+      - name: Surface build errors as annotations
+        if: failure()
+        run: |
+          if [ -f /tmp/build.log ]; then
+            echo "=== 构建错误（同时已转为注解）==="
+            grep -aE "^e: |Unresolved reference|error:|not found|^> Task .*FAILED|^FAILURE:|Caused by:" /tmp/build.log \
+              | head -60 | while IFS= read -r line; do echo "::error::$line"; done
+            echo "=== 日志尾部 40 行 ==="
+            tail -40 /tmp/build.log
+          else
+            echo "::error::构建日志文件不存在（构建可能没跑到这一步）"
+          fi
 
       # 把体积打进日志：APK 大小主要由 libVLC 的 arm64-v8a 原生库决定（约 50 MB）。
       - name: Report APK size

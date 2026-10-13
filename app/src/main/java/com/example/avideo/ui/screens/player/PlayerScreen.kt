@@ -1,7 +1,6 @@
 package com.example.avideo.ui.screens.player
 
 import android.content.Context
-import android.net.Uri
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.compose.foundation.background
@@ -23,8 +22,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import org.videolan.libvlc.LibVLC
-import org.videolan.libvlc.Media
-import org.videolan.libvlc.util.VideoView
+import org.videolan.libvlc.util.VLCVideoLayout
 
 /**
  * 播放页 — libVLC 承载
@@ -67,22 +65,19 @@ fun PlayerScreen(
         // libVLC SurfaceView 占位
         AndroidView(
             factory = { ctx ->
-                val videoView = VideoView(ctx).apply {
+                // libvlc-all 3.6.5 里的渲染视图是 VLCVideoLayout —— 该版本**没有** VideoView 这个类
+                // （已解出 AAR 的 classes.jar 逐个核对：LibVLC ✓ / Media ✓ / VideoView ✗ / VLCVideoLayout ✓）。
+                //
+                // 目前只挂视图、不播任何东西：数据源要等 stage-2 的本地 HTTP Range 桥（一次性 token URL）。
+                // 届时由 MediaPlayer.attachViews(VLCVideoLayout, …) + Media(token URL) 接上；
+                // 现在不写进去，是因为那些 API 尚未在本项目验证过，而这里的目标是先让 APK 能构建出来。
+                VLCVideoLayout(ctx).apply {
                     layoutParams = FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
                 }
-                // TODO: 接入 LocalHttpService token URL
-                val media = Media(libVLC, Uri.parse("https://example.com_placeholder/${fileId}"))
-                videoView.setMedia(media)
-                videoView
             },
-            update = { videoView ->
-                // libVLC 实例不变，只需更新 media（当 fileId 变化时）
-                val media = Media(libVLC, Uri.parse("https://example.com_placeholder/${fileId}"))
-                videoView.setMedia(media)
-            }
         )
 
         // 加载/错误覆盖层（播放前或失败时显示）
