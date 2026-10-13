@@ -1,0 +1,69 @@
+name: Build debug APK
+
+# 为什么在 CI 构建：本机没有（也不想装）Android SDK。
+# GitHub 的 ubuntu-latest runner 自带 Android SDK（ANDROID_SDK_ROOT 已设好），
+# 所以 settings.gradle.kts 里的 hasAndroidSdk 条件在 runner 上成立，:app / :ui 会被纳入构建。
+#
+# 构建产物在 Actions 页面的 Artifacts 里下载，传到手机点一下即可安装（sideload 不需要 adb）。
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - stage-0-container-format
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 缓存 Gradle 依赖与 wrapper，显著加快第二次之后的构建。
+      # 注意这里用官方 setup-gradle：它同时负责 wrapper 校验（我们提交了校验和之外的 properties）。
+      - uses: gradle/actions/setup-gradle@v4
+
+      # :core 是纯 Kotlin/JVM 的容器格式与加解密核心 —— 全仓库唯一有真实测试的部分。
+      # 它不需要 Android SDK，但放在这里跑可以让每次 APK 构建都顺带守住格式不变量。
+      - name: Test the container core
+        run: ./gradlew :core:test --console=plain
+
+      # 真正的目的：验证 libVLC 能不能被打进 APK（OV-9 称这是零经验者真正的第一道坎：
+      # AAR 100+ MB、多 ABI、extractNativeLibs、16 KB page size、.so 冲突）。
+      - name: Assemble debug APK
+        run: ./gradlew :app:assembleDebug --console=plain --stacktrace
+
+      # 把体积打进日志：APK 大小主要由 libVLC 的 arm64-v8a 原生库决定（约 50 MB）。
+      - name: Report APK size
+        run: |
+          echo "=== APK ==="
+          ls -lh app/build/outputs/apk/debug/*.apk
+          echo "=== 打进 APK 的原生库（按 ABI）==="
+          unzip -l app/build/outputs/apk/debug/*.apk | grep '\.so$' || echo "（没有 .so —— 说明 libVLC 没被打进去，需要排查）"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      # 失败时把测试报告带出来，否则只能看日志。
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            core/build/reports/tests/
+            core/build/test-results/
+          if-no-files-found: ignore

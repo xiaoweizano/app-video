@@ -73,8 +73,13 @@ dependencies {
     // libVLC for playback
     implementation("org.videolan.android:libvlc-all:3.6.5")
 
-    // Argon2id KDF
-    implementation("com.github.Aidoop:argon2-android:1.4.0")
+    // Argon2id KDF —— 这里原本是 com.github.Aidoop:argon2-android:1.4.0（来自 jitpack）。
+    // 暂移除，两个理由：
+    //   1) 全仓库没有任何代码引用它（只有注释里提到 argon2id）；
+    //   2) 它来自 jitpack —— jitpack 按需现场构建，CI 上经常慢或失败，会让构建不稳定。
+    // stage-1 接 Android KDF 时应改为设计文档指定的实现：
+    //   implementation("com.lambdapioneer.argon2kt:argon2kt:<版本>")   // Maven Central
+    // 并且必须通过 :core 的 KeyDerivation 接口注入（见 MasterKeyDeriver，注意 MUST NOT 调用 forJvmOnly()）。
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
