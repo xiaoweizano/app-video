@@ -18,3 +18,26 @@ captures/
 # 平台
 .DS_Store
 Thumbs.db
+
+# 设计文档与个人配置：**刻意不入版本库、也不推远程**
+# 它们留在工作区磁盘上，只是不跟踪。原因见用户决定：
+# 仓库是公开的，而这些文件含产品判断、范围决策与威胁模型。
+ARCHITECTURE.md
+BOUNDARIES.md
+CEO-PLAN.md
+TODOS.md
+PRODUCT.md
+DUE-DILIGENCE.md
+DESIGN.md
+CLAUDE.md
+claude-zh.md
+jiagou.txt
+external-review-prompt.md
+architecture.png
+openspec/
+docs/
+.impeccable/
+.claude/
+
+# 历史重写前的完整 .git 备份（确认无误后可删）
+.git.before-docs-removal/
