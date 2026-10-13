@@ -21,6 +21,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
+import com.example.avideo.BuildConfig
+import kotlinx.coroutines.launch
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.util.VLCVideoLayout
 
@@ -111,7 +113,9 @@ fun PlayerScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
                             onClick = { scope.launch { playState = PlayState.Loading } },
-                            contentColor = Color.White
+                            // material3 的 OutlinedButton 没有 contentColor 参数（那是 material2 的写法），
+                            // 颜色要走 colors。
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
                         ) { Text("重试") }
                         Button(
                             onClick = onBack,
@@ -133,7 +137,10 @@ fun PlayerScreen(
             ) {
                 // 进度条：1dp 白色细线，无 chrome（DESIGN.md §2）
                 LinearProgressIndicator(
-                    progress = { if (isPlaying) 0.3f else 0f },
+                    // 用 Float 形式：本项目 BOM 里的 material3 是 1.1.x，progress 参数是 Float
+                    // （lambda 形式是 1.2.0 才加的；同项目的 ExportScreen 用 Float 形式能编译，
+                    // 这一处用 lambda 就找不到重载）。Float 形式在 1.2.x 里虽已废弃但仍存在。
+                    progress = if (isPlaying) 0.3f else 0f,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(1.dp),
