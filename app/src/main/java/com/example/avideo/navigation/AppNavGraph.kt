@@ -48,7 +48,9 @@ fun AppNavGraph(
             arguments = listOf(navArgument("fileId") { type = NavType.StringType })
         ) { backStackEntry ->
             val fileId = backStackEntry.arguments?.getString("fileId") ?: ""
-            PlayerScreen(fileId = fileId) { navController.popBackStack() }
+            // 注意要把 onBack 写成具名实参：PlayerScreen 的最后一个参数是 modifier，
+            // 用尾随 lambda 会把回调绑到 modifier 上（并让 onBack 缺失）。
+            PlayerScreen(fileId = fileId, onBack = { navController.popBackStack() })
         }
 
         composable(Screen.ImportFlow.route) {

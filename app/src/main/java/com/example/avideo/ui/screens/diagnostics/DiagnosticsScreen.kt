@@ -11,6 +11,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.avideo.ui.theme.success
+import com.example.avideo.ui.theme.warning
 
 /**
  * 诊断页 — 不泄露敏感信息

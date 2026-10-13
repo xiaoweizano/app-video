@@ -6,6 +6,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import java.io.File
@@ -113,3 +115,17 @@ fun ExportScreen(
             onDismissRequest = { showConfirmDialog = false },
             title = { Text("确认导出") },
             text = { Text("将覆盖目标文件，确定继续吗？\n此操作不可撤销。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showConfirmDialog = false
+                    // TODO(stage-3): 真正的导出尚未实现。导出属 vault-export
+                    // （zip STORE 模式 + SAF ACTION_CREATE_DOCUMENT），这里先只关对话框并返回。
+                    onComplete()
+                }) { Text("覆盖") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConfirmDialog = false }) { Text("取消") }
+            }
+        )
+    }
+}

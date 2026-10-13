@@ -1,5 +1,6 @@
 package com.example.avideo.ui.theme
 
+import androidx.compose.material3.ColorScheme
 import androidx.compose.ui.graphics.Color
 
 // Swiss Internationalist · a-video Dark Theme
@@ -29,3 +30,10 @@ val md_theme_light_onPrimary        = Color(0xFFF5F5F3)
 val md_theme_light_error            = Color(0xFFC62828)
 val md_theme_light_success          = Color(0xFF2E7D32)
 val md_theme_light_warning          = Color(0xFFE65100)
+
+// Material3 的 ColorScheme **没有** success / warning 这两个角色，但本项目要它们承载状态语义
+// （DESIGN.md：绿 = 已藏好，琥珀 = 尚未隐藏）。做成 ColorScheme 的扩展属性，
+// 屏幕侧照常写 `colorScheme.success`，语义定义留在主题层。
+// 目前只取暗色主题的值（本 App 暗色优先）；明色主题真正启用时再按 isSystemInDarkTheme 分支。
+val ColorScheme.success: Color get() = md_theme_dark_success
+val ColorScheme.warning: Color get() = md_theme_dark_warning
