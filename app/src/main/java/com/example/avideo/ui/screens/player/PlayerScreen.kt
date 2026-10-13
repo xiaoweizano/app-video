@@ -47,6 +47,10 @@ fun PlayerScreen(
     var playState by remember { mutableStateOf<PlayState>(PlayState.Loading) } // Loading | Buffering | Playing | Paused | Error
     val scope = rememberCoroutineScope()
 
+    // 底部控制栏的图标要用它上色；UnlockScreen 里有同一行声明，这个文件原先漏了，
+    // 于是 160/174 行报 "Unresolved reference: colorScheme"。
+    val colorScheme = MaterialTheme.colorScheme
+
     // libVLC 实例：用 remember 持有，避免每次 recompose 重建导致内存泄漏
     val libVLC by remember { mutableStateOf(LibVLC(context)) }
 

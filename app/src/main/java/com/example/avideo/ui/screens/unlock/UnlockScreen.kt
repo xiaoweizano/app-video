@@ -47,6 +47,35 @@ fun UnlockScreen(
 
     val keyboard = LocalSoftwareKeyboardController.current
 
+    // 注意：Kotlin 的**局部函数必须先声明后使用**（不像成员函数那样能提前引用）。
+    // 这个函数在下面的 Column 里被 onDone / onClick 调用，所以必须放在 Column 之前。
+    // 原先它被写在文件末尾，编译器报 "Unresolved reference: attemptUnlock"。
+    fun attemptUnlock() {
+        if (password.length < 4) {
+            errorMessage = "密码长度不足"
+            return
+        }
+        // TODO: 接入真实 KDF 验证逻辑
+        // 模拟：开始KDF等待 → 完成后解锁或报错
+        isLoading = true
+        kdfProgress = 0f
+        scope.launch {
+            // 模拟KDF耗时（真实场景是argon2id派生密钥）
+            while (kdfProgress < 1.0f) {
+                delay(80L)
+                kdfProgress = (kdfProgress + 0.05f).coerceAtMost(1.0f)
+            }
+            if (password == "corrupt") {
+                errorType = ErrorType.VAULT_CORRUPTED
+                errorMessage = null
+            } else {
+                onLocked()
+            }
+            isLoading = false
+            kdfProgress = 0f
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -199,31 +228,6 @@ fun UnlockScreen(
         }
     }
 
-    fun attemptUnlock() {
-        if (password.length < 4) {
-            errorMessage = "密码长度不足"
-            return
-        }
-        // TODO: 接入真实 KDF 验证逻辑
-        // 模拟：开始KDF等待 → 完成后解锁或报错
-        isLoading = true
-        kdfProgress = 0f
-        scope.launch {
-            // 模拟KDF耗时（真实场景是argon2id派生密钥）
-            while (kdfProgress < 1.0f) {
-                delay(80L)
-                kdfProgress = (kdfProgress + 0.05f).coerceAtMost(1.0f)
-            }
-            if (password == "corrupt") {
-                errorType = ErrorType.VAULT_CORRUPTED
-                errorMessage = null
-            } else {
-                onLocked()
-            }
-            isLoading = false
-            kdfProgress = 0f
-        }
-    }
 }
 
 private enum class ErrorType { WRONG_PASSWORD, VAULT_CORRUPTED }
