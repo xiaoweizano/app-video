@@ -54,6 +54,20 @@ jobs:
           set -o pipefail
           ./gradlew :app:assembleDebug --console=plain --stacktrace 2>&1 | tee /tmp/build.log
 
+      # 把实际解析出的 Compose / libVLC 版本打成注解。
+      # 为什么需要：本项目第一次真机崩溃就是「版本悄悄错配」—— BOM 2024.01.00 把
+      # material3 1.1.2 与 animation-core 1.6.0 钉在一起，两者的 KeyframesSpec API 不兼容，
+      # 于是 CircularProgressIndicator 一渲染就 NoSuchMethodError，而编译期完全看不出来。
+      # 这个注解让版本组合在每次构建里都可见，不必等装到手机上才发现。
+      - name: Report resolved Compose and libVLC versions
+        if: always()
+        run: |
+          ./gradlew :app:dependencies --configuration debugRuntimeClasspath --console=plain 2>/dev/null \
+            | grep -E 'androidx\.compose|org\.videolan' \
+            | sed 's/^[^a-zA-Z]*//' | sed 's/ (\*)//' | sed 's/^/resolved /' \
+            | sort -u | head -40 \
+            | while IFS= read -r line; do echo "::notice::$line"; done
+
       # 失败时把编译器错误逐条转成 GitHub 注解。
       # 为什么这么做：job 日志的 API 需要认证，而注解不需要 —— 这样"哪一行编译不过"在公开仓库上
       # 可以被匿名读到，省掉"人肉复制日志"的来回。

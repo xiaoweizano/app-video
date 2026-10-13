@@ -63,7 +63,13 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.activity:activity-compose:1.8.2")
-    implementation(platform("androidx.compose:compose-bom:2024.01.00"))
+    // BOM 必须用 2024.02.00 或更高。2024.01.00 是不一致的组合：
+    // 它把 material3 1.1.2（POM 里声明依赖 animation-core 1.4.1）与 animation-core 1.6.0 钉在一起，
+    // 而 1.6.0 里 KeyframesSpecConfig.at() 的签名已变 —— 于是 CircularProgressIndicator 一渲染
+    // 就抛 NoSuchMethodError（真机实测，UnlockScreen 的加载态）。
+    // 压低 animation-core 不是选项：ui 1.6.0 是按 animation-core 1.6.0 编译的，压低会换成 ui 崩。
+    // 方向只能是把 material3 抬到与 1.6.x 配套的 1.2.x。
+    implementation(platform("androidx.compose:compose-bom:2024.02.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
