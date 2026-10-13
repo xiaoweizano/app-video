@@ -11,6 +11,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import java.io.File
+import com.example.avideo.ui.SkeletonBadge
 
 /**
  * 导出流程 — 生成 .avault.zip
@@ -50,6 +51,7 @@ fun ExportScreen(
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            SkeletonBadge(text = "骨架 · 导出未实现（zip 打包与 SAF 都属于 stage-3）")
             Text(
                 text = "将整个保险箱导出为单个 .avault.zip 文件，可拷至电脑、网盘或 U 盘。",
                 style = MaterialTheme.typography.bodyMedium,

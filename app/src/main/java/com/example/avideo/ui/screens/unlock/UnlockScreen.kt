@@ -19,6 +19,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import com.example.avideo.BuildConfig
+import com.example.avideo.ui.SkeletonBadge
 import com.example.avideo.ui.theme.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -33,6 +35,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun UnlockScreen(
     onLocked: () -> Unit,
+    onDebug: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var password by remember { mutableStateOf("") }
@@ -226,6 +229,18 @@ fun UnlockScreen(
                 }
             }
         }
+
+        // debug 专用入口。放在解锁页底部是为了不必先输密码就能进去 ——
+        // 那两个探针（私有目录可见性 / 格式普查）跟密码无关。
+        if (BuildConfig.DEBUG) {
+            Spacer(modifier = Modifier.height(24.dp))
+            TextButton(onClick = onDebug) {
+                Text("诊断探针（debug 专用）", style = MaterialTheme.typography.labelSmall)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+        SkeletonBadge(text = "骨架 · 解锁是模拟的（未接 Argon2id 与真实仓库）")
     }
 
 }

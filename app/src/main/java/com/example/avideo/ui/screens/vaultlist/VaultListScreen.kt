@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.avideo.ui.SkeletonBadge
 import com.example.avideo.ui.theme.*
 import kotlinx.coroutines.delay
 
@@ -109,6 +110,11 @@ fun VaultListScreen(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                // 标注：下面这三条是硬编码的示例数据。实测装上真机后确实会问「这几个视频是哪来的」，
+                // 所以把话说在界面上，而不是只写在代码注释里。
+                item {
+                    SkeletonBadge(text = "骨架 · 下面是硬编码的示例数据，不是你的视频（真实数据源未接）")
+                }
                 items(entries, key = { it.id }) { entry ->
                     VaultEntryRow(
                         entry = entry,

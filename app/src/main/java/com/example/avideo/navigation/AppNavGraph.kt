@@ -7,6 +7,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.example.avideo.ui.screens.debug.DebugProbeScreen
 import com.example.avideo.ui.screens.diagnostics.DiagnosticsScreen
 import com.example.avideo.ui.screens.export.ExportScreen
 import com.example.avideo.ui.screens.importflow.ImportFlowScreen
@@ -28,7 +29,8 @@ fun AppNavGraph(
     ) {
         composable(Screen.Unlock.route) {
             UnlockScreen(
-                onLocked = { navController.navigate(Screen.VaultList.route) }
+                onLocked = { navController.navigate(Screen.VaultList.route) },
+                onDebug = { navController.navigate(Screen.Debug.route) }
             )
         }
 
@@ -69,6 +71,12 @@ fun AppNavGraph(
 
         composable(Screen.Diagnostics.route) {
             DiagnosticsScreen(onBack = { navController.popBackStack() })
+        }
+
+        // debug 专用目的地：诊断探针。入口在解锁页底部，且只在 BuildConfig.DEBUG 时显示，
+        // 所以 release 构建里用户到不了这里。
+        composable(Screen.Debug.route) {
+            DebugProbeScreen(onBack = { navController.popBackStack() })
         }
     }
 }

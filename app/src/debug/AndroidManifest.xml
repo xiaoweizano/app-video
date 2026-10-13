@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  debug 专用清单。
+
+  为什么把权限放这里而不是主清单：这个 App 的隐私承诺里**不该出现「读取你的媒体库」**——
+  正式版根本不需要它（导入走 SAF，见 TODOS.md T28）。
+  但「统计库里冷门格式占比」（T0 尽调）这个**一次性诊断**需要枚举媒体库，
+  所以只让 debug 构建声明它。AGP 只在 debug 构建里合并本文件，release 不受影响。
+
+  注：目标机是 API 31，所以实际生效的是 READ_EXTERNAL_STORAGE；
+  READ_MEDIA_VIDEO 是 API 33+ 的替代品，一起声明以便将来换机也能用。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+
+</manifest>

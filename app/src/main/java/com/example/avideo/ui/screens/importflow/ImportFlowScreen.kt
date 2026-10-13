@@ -15,6 +15,7 @@ import com.example.avideo.ui.theme.success
 import com.example.avideo.ui.theme.warning
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import com.example.avideo.ui.SkeletonBadge
 
 /**
  * 导入流程 — 两阶段：确认 → 云端警告（可选）→ 进度 → 结果
@@ -58,6 +59,7 @@ fun ImportFlowScreen(
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            SkeletonBadge(text = "骨架 · 导入是模拟的（假进度；真实加密写入与源文件删除未接）")
             when (stage) {
                 ImportStage.Confirm -> {
                     ConfirmCard(

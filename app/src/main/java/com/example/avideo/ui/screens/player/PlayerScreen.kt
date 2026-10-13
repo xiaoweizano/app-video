@@ -22,6 +22,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import com.example.avideo.BuildConfig
+import com.example.avideo.ui.SkeletonBadge
 import kotlinx.coroutines.launch
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.util.VLCVideoLayout
@@ -68,6 +69,14 @@ fun PlayerScreen(
             .fillMaxSize()
             .background(Color.Black)
     ) {
+        // 标注：播放器没有数据源（stage-2 才接本地 HTTP Range 桥），所以永远停在加载态。
+        // 附带的真实收获：进到这一屏就会构造 LibVLC → 加载原生库，
+        // 它不崩即说明 libVLC 的打包在这台机器上成立（OV-9 点名的第一道坎）。
+        SkeletonBadge(
+            text = "骨架 · 播放器未接数据源，会一直停在「正在加载视频」",
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = 16.dp)
+        )
+
         // libVLC SurfaceView 占位
         AndroidView(
             factory = { ctx ->

@@ -13,6 +13,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.avideo.ui.theme.success
 import com.example.avideo.ui.theme.warning
+import com.example.avideo.ui.SkeletonBadge
 
 /**
  * 诊断页 — 不泄露敏感信息
@@ -70,6 +71,9 @@ fun DiagnosticsScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            item {
+                SkeletonBadge(text = "骨架 · 下面的数值是硬编码的，不是真实诊断结果")
+            }
             items(items) { item ->
                 DiagnosticRow(item = item)
             }
