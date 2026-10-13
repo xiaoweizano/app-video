@@ -28,6 +28,16 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # 固定 debug 签名。不加这一步的话，runner 每次都会新建一个 debug keystore，
+      # 于是每个 APK 的签名都不同 —— 手机上「覆盖安装」会因签名不一致失败，只能先卸载。
+      # 缓存之后签名稳定，可以直接覆盖安装（开发迭代时省事很多）。
+      # 注意：这只是 debug 签名，不能用于 release；release 要用 TODOS.md T0.7 里那个自签名 keystore。
+      - name: Cache debug keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
       # 缓存 Gradle 依赖与 wrapper，显著加快第二次之后的构建。
       # 注意这里用官方 setup-gradle：它同时负责 wrapper 校验（我们提交了校验和之外的 properties）。
       - uses: gradle/actions/setup-gradle@v4
