@@ -27,7 +27,7 @@ import com.example.avideo.ui.theme.*
 /**
  * 列表页 — 保险箱视频列表
  *
- * 列表数据是**真实的**：`VaultGateway.entries()` 枚举 `data/*.bin`、逐个解 metadata 区
+ * 列表数据是**真实的**：`VaultGateway.entries()` 枚举 `data/<uuid>.bin`、逐个解 metadata 区
  * （不解任何数据块）。主密钥从 `KeyRepository` 取，取不到就拒绝显示并要求重新解锁。
  *
  * 仍未接的部分：导入（stage-1）、播放（stage-2）、删除（stage-1）。它们都在界面上如实标注，

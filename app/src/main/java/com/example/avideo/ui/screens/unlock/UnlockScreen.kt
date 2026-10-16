@@ -7,6 +7,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -276,10 +279,10 @@ private fun PasswordField(
         trailingIcon = {
             IconButton(onClick = onToggleVisibility) {
                 Icon(
-                    imageVector = if (showPassword)
-                        androidx.compose.material.icons.Icons.Filled.Visibility
-                    else
-                        androidx.compose.material.icons.Icons.Filled.VisibilityOff,
+                    // 必须**import**这两个图标：它们是 Icons.Filled 上的扩展属性，
+                    // 全限定写法（androidx.compose.material.icons.Icons.Filled.Visibility）
+                    // 不会把扩展带进作用域，编译期会报 Unresolved reference。
+                    imageVector = if (showPassword) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
                     contentDescription = if (showPassword) "隐藏密码" else "显示密码",
                     tint = colorScheme.onSurfaceVariant
                 )
