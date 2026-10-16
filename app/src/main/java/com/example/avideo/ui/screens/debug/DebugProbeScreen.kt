@@ -18,7 +18,9 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -26,6 +28,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -68,6 +71,10 @@ import java.io.File
  * 起因：stage-1 的导入还没接通，而**空仓库对任何密码都放行** —— 没有条目就验证不了
  * 列表、密码校验、锁定/解锁这条完整路径（真机上唯一能验的方式就是自己写一条进去）。
  * 走的是生产同一套 `EncryptedFileWriter` / `EncryptedFileReader`，没有另开路径。
+ *
+ * **R · 重置仓库（debug）**
+ * 删掉整个仓库并清密钥，用来走出「密码被锚错所以再也进不去」这个死局
+ * （空仓库对任何密码都放行，第一次写入锚定当时那把密码，且没有恢复路径 —— 这是设计）。
  *
  * 本页只在 debug 构建可达（入口在解锁页底部），且媒体读取权限只声明在
  * `app/src/debug/AndroidManifest.xml` —— release 不声明，因为正式版走 SAF，不需要读媒体库。
@@ -176,17 +183,98 @@ fun DebugProbeScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             var isWriting by remember { mutableStateOf(false) }
+            var showAnchorConfirm by remember { mutableStateOf(false) }
+
+            fun startWrite() {
+                isWriting = true
+                scope.launch {
+                    append(VaultGateway.writeAndVerifyProbeEntry(context))
+                    isWriting = false
+                }
+            }
+
             Button(
                 onClick = {
-                    isWriting = true
-                    scope.launch {
-                        append(VaultGateway.writeAndVerifyProbeEntry(context))
-                        isWriting = false
-                    }
+                    // 密码还没被任何文件证明过 ⇒ 这次写入会**锚定**当前密码（而且是不可逆的），
+                    // 所以必须在写之前问一次，而不是写完再在输出里解释。
+                    if (VaultGateway.isPasswordProven()) startWrite() else showAnchorConfirm = true
                 },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !isWriting
             ) { Text(if (isWriting) "正在写入并读回…" else "写入合成条目并读回核对") }
+
+            if (showAnchorConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showAnchorConfirm = false },
+                    title = { Text("这次写入会永久锚定当前密码") },
+                    text = {
+                        Text(
+                            "这个仓库现在是空的，所以刚才那次输入的密码没有被任何文件校验过 —— " +
+                                "任何密码都能进来，而不同密码派生出的密钥互不相同。" +
+                                "写入之后，只有当前这一次输入的密码能解开这个文件（以及之后写入的文件），" +
+                                "而且没有恢复路径。\n\n" +
+                                "如果你不确定刚输的是哪一把：先取消，回上一页用下面的「重置仓库」清空，" +
+                                "再用你确定要用的那个密码进来。"
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showAnchorConfirm = false
+                            startWrite()
+                        }) { Text("我确定，写入") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showAnchorConfirm = false }) { Text("取消") }
+                    }
+                )
+            }
+
+            HorizontalDivider()
+
+            Text("R · 重置仓库（debug）", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "删掉整个仓库目录（vault.meta / vault.meta.bak / data 下的密文条目）并清掉内存里的密钥，" +
+                    "然后返回上一页重新设置密码。\n" +
+                    "为什么需要这条路：空仓库对任何密码都放行，而「第一次写入会把当时那把密码永久锚定」 —— " +
+                    "密码一旦锚定就没有恢复路径（这是设计）。开发阶段很容易锚错，没有这条路真机会卡在" +
+                    "「再也进不去」。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            var showResetConfirm by remember { mutableStateOf(false) }
+            var isResetting by remember { mutableStateOf(false) }
+            Button(
+                onClick = { showResetConfirm = true },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isResetting,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+            ) { Text(if (isResetting) "正在重置…" else "重置仓库（删掉全部条目）") }
+
+            if (showResetConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showResetConfirm = false },
+                    title = { Text("删除整个仓库？") },
+                    text = {
+                        Text(
+                            "vault.meta、vault.meta.bak 与 data/ 下的全部密文条目都会被删除，不可恢复。" +
+                                "（合成自检条目也一起删。）"
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showResetConfirm = false
+                            isResetting = true
+                            scope.launch {
+                                append(VaultGateway.resetVault(context))
+                                isResetting = false
+                            }
+                        }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showResetConfirm = false }) { Text("取消") }
+                    }
+                )
+            }
 
             HorizontalDivider()
 
@@ -235,7 +323,7 @@ private suspend fun crossImplementationSelfTest(): String = try {
         sb.append("    ✓ 一致：真机的 argon2kt 与 BouncyCastle/JVM 产出同一份字节，换平台能解开。\n")
     } else {
         sb.append(
-            "    ✗ 不一致：真机解不开 JVM 写的仓库，**先别导入任何视频**。\n" +
+            "    ✗ 不一致：真机解不开 JVM 写的仓库，先别导入任何视频！\n" +
                 "      排查顺序：① 参数是否传全（argon2kt 默认 t=1/p=2，与生产不同）" +
                 "② 版本必须是 V13 ③ 密码要按 UTF-8 编码、且经过 NFC。\n"
         )

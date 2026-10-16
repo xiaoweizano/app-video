@@ -94,7 +94,8 @@ fun UnlockScreen(
             isWorking = false
             when (outcome) {
                 is UnlockOutcome.Unlocked -> onUnlocked(outcome.probe.keyProven)
-                UnlockOutcome.WrongPassword -> outcomeError = OutcomeError.WrongPassword
+                is UnlockOutcome.WrongPassword ->
+                    outcomeError = OutcomeError.WrongPassword(outcome.candidateFingerprint)
                 UnlockOutcome.VaultCorrupted -> outcomeError = OutcomeError.Corrupted
                 is UnlockOutcome.Failed -> outcomeError = OutcomeError.Other(outcome.detail)
             }
@@ -149,6 +150,15 @@ fun UnlockScreen(
                     Text(
                         text = "空仓库无法校验密码：刚创建的保险箱里没有任何文件，" +
                             "所以在你导入第一个视频之前，系统无法判断密码是否输对。请务必记住它。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        // 真机踩过的坑：空仓库对任何密码都放行，于是「顺手输个别密码进去看看」
+                        // 会把那把密码锚定到第一个写入的文件上，创建时的密码反而再也进不来。
+                        text = "也别在导入第一个视频之前用别的密码进来「试试」：" +
+                            "第一次写入会把当时那把密码永久锚定，之后只有它能解开仓库。",
                         style = MaterialTheme.typography.bodySmall,
                         color = colorScheme.onSurfaceVariant
                     )
@@ -293,7 +303,7 @@ private fun PasswordField(
 
 /** 三种失败各有各的文案与建议，MUST NOT 合并成一句「密码错误」。 */
 private sealed interface OutcomeError {
-    object WrongPassword : OutcomeError
+    data class WrongPassword(val candidateFingerprint: String) : OutcomeError
     object Corrupted : OutcomeError
     data class Other(val detail: String) : OutcomeError
 }
@@ -302,7 +312,7 @@ private sealed interface OutcomeError {
 private fun ErrorCard(error: OutcomeError, onDiagnostics: () -> Unit) {
     val colorScheme = MaterialTheme.colorScheme
     val (title, advice) = when (error) {
-        OutcomeError.WrongPassword -> "密码不对" to
+        is OutcomeError.WrongPassword -> "密码不对" to
             "检查一下大小写、输入法状态与首尾空格。密码经过 Unicode 规范化，全角/半角字符不是同一个字。"
         OutcomeError.Corrupted -> "仓库元数据损坏" to
             "vault.meta 与 vault.meta.bak 两份都没通过校验，跟密码无关。先别卸载或重装 App" +
@@ -322,6 +332,26 @@ private fun ErrorCard(error: OutcomeError, onDiagnostics: () -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
                 color = colorScheme.onSurfaceVariant
             )
+            if (error is OutcomeError.WrongPassword) {
+                // 指纹 + 锚定说明。这不是给终端用户的文案，是给「我确定密码没记错」这种时刻的：
+                // 空仓库对任何密码都放行，而第一次写入会把当时那把密码永久锚定 ——
+                // 开发阶段踩过一次，表现就是「密码明明没记错却再也进不去」。
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "这次密码派生的密钥指纹：${error.candidateFingerprint}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "如果这个仓库是刚建的、还没导入过自己的视频，而中途解锁时随便输过一个密码 ——" +
+                        "那一次的密码已经被第一个写入的文件永久锚定了（空仓库无法校验密码，" +
+                        "所以任何密码都能进，而写入时用的是当次那把）。" +
+                        "要换密码重来，请在诊断探针页用「重置仓库」。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colorScheme.onSurfaceVariant
+                )
+            }
             if (error == OutcomeError.Corrupted) {
                 Spacer(modifier = Modifier.height(8.dp))
                 TextButton(onClick = onDiagnostics) {

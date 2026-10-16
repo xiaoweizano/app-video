@@ -84,6 +84,7 @@ object VaultGateway {
             }
             holdMasterKey(derive(password, meta))
             // 刚创建的仓库一定是空的 ⇒ 密码无法校验，如实标记，MUST NOT 声称已验证。
+            sessionPasswordProven = false
             UnlockOutcome.Unlocked(MasterKeyProbe(sampled = 0, unwrapped = 0))
         }
 
@@ -112,11 +113,15 @@ object VaultGateway {
                 val probe = directory.probeMasterKey(candidate)
                 if (probe.keyProven || probe.unverifiable) {
                     // 空仓库（unverifiable）也放行：没有任何东西可以验证主密钥，
-                    // 不放行就永远导不进第一个文件。但界面 MUST 如实说「密码尚未被校验」。
+                    // 不放行就永远导不进第一个文件。但界面 MUST 如实说「密码尚未被校验」，
+                    // 而且这个「尚未被校验」的密码会在第一次写入时被永久锚定（见成员注释）。
                     holdMasterKey(candidate)
+                    sessionPasswordProven = probe.keyProven
                     UnlockOutcome.Unlocked(probe)
                 } else {
-                    UnlockOutcome.WrongPassword
+                    // 带上候选密钥的指纹：它让「我确定密码没记错」这句话可以被核对 ——
+                    // 与写入时打印的指纹一致却仍解不开，那就是代码的问题，不是记性。
+                    UnlockOutcome.WrongPassword(keyFingerprint(candidate))
                 }
             } catch (e: VaultError) {
                 // 只带错误类型名（结构性信息），不带路径/密钥/盐
@@ -159,6 +164,20 @@ object VaultGateway {
     }
 
     /**
+     * 当前会话的密码**是否被已有文件证明过**。
+     *
+     * 为什么必须记着：空仓库对任何密码都放行（spec 要求），所以「能进来」不等于「密码是对的」。
+     * 而**第一个写入的文件会用当前这把密钥包裹自己的 wrapped_file_key** —— 从那一刻起，
+     * 仓库就永久只认这把密码了。这就是「密码被锚定」：真机上实测踩过一次，
+     * 表现是「我确定密码没记错，但再也进不去了」。
+     */
+    @Volatile
+    private var sessionPasswordProven = false
+
+    /** 见 [sessionPasswordProven]。 */
+    fun isPasswordProven(): Boolean = sessionPasswordProven
+
+    /**
      * **仅 debug 自检用**：往仓库里写一个合成条目，再立刻读回来逐块核对 SHA-256。
      *
      * 为什么现在就需要它：stage-1 的导入还没接通，而**空仓库对任何密码都放行** ——
@@ -170,6 +189,9 @@ object VaultGateway {
      *
      * 尺寸刻意取 2 块 + 一个短末块：跨块与变长末块是容器里最容易写错的两处
      * （块序号、末块明文长度、disk offset 映射）。
+     *
+     * 输出里会带上**当前主密钥的指纹**，并且在密码未被证明过时给出明确警告 ——
+     * 因为这一次写入会把当前密码永久锚定，而用户可能并不知道自己锚的是哪把。
      */
     suspend fun writeAndVerifyProbeEntry(context: Context): String = withContext(Dispatchers.Default) {
         val masterKey = KeyRepository.getMasterKey()
@@ -180,6 +202,12 @@ object VaultGateway {
             val size = 2 * ContainerConstants.CHUNK_PLAINTEXT + 12_345
             val plaintext = ByteArray(size) { i -> ((i * 31) xor (i shr 8) xor 0x5A).toByte() }
             val expected = MessageDigest.getInstance("SHA-256").digest(plaintext)
+
+            val sb = StringBuilder("[D] 写入 + 读回自检\n")
+            sb.append("    本次使用的主密钥指纹 ${keyFingerprint(masterKey)}（解锁失败时会拿它对照）\n")
+            if (!sessionPasswordProven) {
+                sb.append("    ⚠ 写入前仓库是空的：本次会话输入的密码已作为锚定密码写进这个文件。\n")
+            }
 
             directory.newWriter(uuid, masterKey).use { writer ->
                 writer.writeFrom(
@@ -192,7 +220,7 @@ object VaultGateway {
                 )
             }
 
-            val sb = StringBuilder("[D] 写入 + 读回自检\n    条目 uuid=$uuid\n    明文 $size 字节\n")
+            sb.append("    条目 uuid=$uuid\n    明文 $size 字节\n")
             val entry = directory.list(masterKey)
                 .filterIsInstance<VaultEntry.Committed>()
                 .firstOrNull { it.uuid == uuid }
@@ -215,8 +243,10 @@ object VaultGateway {
                     sb.append("    读回明文 ${reader.plaintextLength} 字节（与写入一致=${reader.plaintextLength == size.toLong()}）\n")
                 }
             val ok = digest.digest().contentEquals(expected)
-            sb.append(if (ok) "    ✓ SHA-256 一致：写→读整条路径在真机上成立。\n"
-                     else "    ✗ SHA-256 不一致！解密出来的字节和写进去的不是同一份。\n")
+            sb.append(
+                if (ok) "    ✓ SHA-256 一致：写→读整条路径在真机上成立。\n"
+                else "    ✗ SHA-256 不一致！解密出来的字节和写进去的不是同一份。\n"
+            )
             sb.toString()
         } catch (e: VaultError) {
             "[D] 自检失败：${e.javaClass.simpleName}: ${e.message}\n"
@@ -227,8 +257,42 @@ object VaultGateway {
         }
     }
 
+    /**
+     * **仅 debug**：清空整个仓库（删除 vault 目录）并清掉主密钥。
+     *
+     * 存在的唯一理由：密码一旦被锚定就**没有**恢复路径（这是设计，不是缺陷），
+     * 而开发阶段很容易把密码锚错（空仓库对任何密码都放行）。没有这条路，
+     * 真机就卡死在「再也进不去」的状态。
+     *
+     * 会先统计要删什么，再删 —— 让屏幕上的输出能证明它删掉的确实是这个仓库。
+     */
+    suspend fun resetVault(context: Context): String = withContext(Dispatchers.IO) {
+        val dir = vaultDir(context)
+        if (!dir.exists()) {
+            KeyRepository.clear()
+            sessionPasswordProven = false
+            return@withContext "[R] 没有仓库目录（${dir.absolutePath}），无需重置。已清掉内存里的密钥。"
+        }
+        val files = dir.walkTopDown().filter { it.isFile }.toList()
+        val bytes = files.sumOf { it.length() }
+        val listing = files.joinToString("\n      ") { "${it.name}（${it.length()} 字节）" }
+
+        KeyRepository.clear()
+        sessionPasswordProven = false
+        val deleted = dir.deleteRecursively()
+
+        val sb = StringBuilder("[R] 重置仓库\n    目录 ${dir.absolutePath}\n")
+        sb.append("    待删 ${files.size} 个文件，共 $bytes 字节：\n      $listing\n")
+        sb.append(if (deleted) "    ✓ 已删除，目录不再存在=${!dir.exists()}\n    请返回上一页重新设置密码。\n"
+                 else "    ✗ 删除失败（目录或文件被占用？）\n")
+        sb.toString()
+    }
+
     /** 主动锁定（退出、切后台超时）。 */
-    fun lock() = KeyRepository.clear()
+    fun lock() {
+        KeyRepository.clear()
+        sessionPasswordProven = false
+    }
 
     /**
      * 用**生产完全相同的路径**（NFC 规范化 + argon2kt）派生一把密钥，只给 debug 自检用。
@@ -274,11 +338,33 @@ sealed interface UnlockOutcome {
      */
     data class Unlocked(val probe: MasterKeyProbe) : UnlockOutcome
 
-    object WrongPassword : UnlockOutcome
+    /**
+     * 抽样全部失败：密码不对（或这批文件的 wrapped_file_key 全被损坏 —— 两者无法区分，
+     * 所以按更可能的那个报）。
+     *
+     * [candidateFingerprint] 是**这次输入的密码**派生出的密钥指纹，用于人工与写入时的
+     * 指纹对照。它不含密钥本身，只是一个 4 字节的标识，不落盘。
+     */
+    data class WrongPassword(val candidateFingerprint: String) : UnlockOutcome
+
     object VaultCorrupted : UnlockOutcome
     data class Failed(val detail: String) : UnlockOutcome
 }
 
+/**
+ * 主密钥指纹：`SHA-256("avideo-master-key-id-v1" ‖ key)` 的前 4 字节。
+ *
+ * 用途只有屏幕上的**人工比对**：写入时打印一份、解锁失败时打印一份，一致就说明
+ * 「密码记错了」这个解释不成立，该去查代码。4 字节不足以反推密钥，也不落盘、
+ * 不进日志文件 —— 否则它就变成一个离线爆破的口令 oracle（那正是容器格式里
+ * wrapped_file_key 已经提供的东西，不该再多一个）。
+ */
+internal fun keyFingerprint(masterKey: ByteArray): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    digest.update("avideo-master-key-id-v1".toByteArray(Charsets.UTF_8))
+    digest.update(masterKey)
+    return digest.digest().take(4).joinToString("") { "%02x".format(it) }
+}
 /** 列表条目。显示名未知（条目损坏）时 [displayName] 为 null。 */
 data class VaultListItem(
     val uuid: String,
