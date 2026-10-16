@@ -8,6 +8,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.Info
@@ -20,6 +21,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.avideo.BuildConfig
 import com.example.avideo.crypto.VaultGateway
 import com.example.avideo.ui.SkeletonBadge
 import com.example.avideo.ui.theme.*
@@ -60,6 +62,8 @@ fun VaultListScreen(
     onDiagnostics: () -> Unit,
     onPlay: (String) -> Unit,
     onRequireUnlock: () -> Unit,
+    /** debug 专用：诊断探针。release 构建里这个按钮不渲染（也就不需要能到那个目的地）。 */
+    onDebugProbe: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -101,6 +105,13 @@ fun VaultListScreen(
                     }
                     IconButton(onClick = onDiagnostics) {
                         Icon(Icons.Default.Info, contentDescription = "诊断")
+                    }
+                    // 探针入口也要有：解锁后用户就在这一页，回不到解锁页底部的那个入口。
+                    // D 自检（写入合成条目）必须先解锁，所以它只能挂在这里。
+                    if (BuildConfig.DEBUG) {
+                        IconButton(onClick = onDebugProbe) {
+                            Icon(Icons.Default.BugReport, contentDescription = "诊断探针（debug）")
+                        }
                     }
                 }
             )

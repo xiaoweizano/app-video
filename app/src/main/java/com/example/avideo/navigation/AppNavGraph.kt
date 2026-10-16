@@ -65,6 +65,9 @@ fun AppNavGraph(
                         popUpTo(Screen.VaultList.route) { inclusive = true }
                     }
                 },
+                // 探针页也用 popBackStack 回来，回来时列表这一屏会被重新组合 ⇒ 自动重新加载，
+                // 所以 D 自检写进去的条目会立刻出现在列表里。
+                onDebugProbe = { navController.navigate(Screen.Debug.route) },
             )
         }
 

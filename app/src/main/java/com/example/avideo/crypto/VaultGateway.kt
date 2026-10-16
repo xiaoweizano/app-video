@@ -2,6 +2,8 @@ package com.example.avideo.crypto
 
 import android.content.Context
 import com.avideo.core.container.ContainerConstants
+import com.avideo.core.container.EncryptedFileReader
+import com.avideo.core.container.FileContainerChannel
 import com.avideo.core.crypto.KdfParams
 import com.avideo.core.crypto.MasterKeyDeriver
 import com.avideo.core.crypto.PasswordNormalizer
@@ -14,8 +16,10 @@ import com.avideo.core.vault.VaultMeta
 import com.avideo.core.vault.VaultMetaIO
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
+import java.security.MessageDigest
 
 /**
  * 仓库的唯一入口：创建、解锁、列出条目。UI 只跟这一个类打交道。
@@ -149,6 +153,75 @@ object VaultGateway {
                     )
                 }
             }
+        } finally {
+            PasswordNormalizer.wipe(masterKey)
+        }
+    }
+
+    /**
+     * **仅 debug 自检用**：往仓库里写一个合成条目，再立刻读回来逐块核对 SHA-256。
+     *
+     * 为什么现在就需要它：stage-1 的导入还没接通，而**空仓库对任何密码都放行** ——
+     * 没有条目就无法验证列表、密码校验、锁定/解锁、区间读这条完整路径。真机上唯一能验的方式
+     * 就是自己写一条进去。
+     *
+     * 走的全是生产代码（`EncryptedFileWriter` / `EncryptedFileReader` / `VaultDirectory.list`），
+     * 没有为自检另开一条路径 —— 否则「自检通过」说明不了生产没问题。
+     *
+     * 尺寸刻意取 2 块 + 一个短末块：跨块与变长末块是容器里最容易写错的两处
+     * （块序号、末块明文长度、disk offset 映射）。
+     */
+    suspend fun writeAndVerifyProbeEntry(context: Context): String = withContext(Dispatchers.Default) {
+        val masterKey = KeyRepository.getMasterKey()
+            ?: return@withContext "[D] 未解锁：先在上一页输入密码进来，再跑这条自检。"
+        try {
+            val directory = directory(context)
+            val uuid = java.util.UUID.randomUUID().toString()
+            val size = 2 * ContainerConstants.CHUNK_PLAINTEXT + 12_345
+            val plaintext = ByteArray(size) { i -> ((i * 31) xor (i shr 8) xor 0x5A).toByte() }
+            val expected = MessageDigest.getInstance("SHA-256").digest(plaintext)
+
+            directory.newWriter(uuid, masterKey).use { writer ->
+                writer.writeFrom(
+                    source = ByteArrayInputStream(plaintext),
+                    displayName = "probe-${uuid.take(8)}.mp4",
+                    declaredPlaintextLen = size.toLong(),
+                    // 合成条目没有真实时长，用哨兵值 —— 列表页会显示「时长未知」，
+                    // 不会编一个 0:00 出来。
+                    durationMs = ContainerConstants.DURATION_UNKNOWN,
+                )
+            }
+
+            val sb = StringBuilder("[D] 写入 + 读回自检\n    条目 uuid=$uuid\n    明文 $size 字节\n")
+            val entry = directory.list(masterKey)
+                .filterIsInstance<VaultEntry.Committed>()
+                .firstOrNull { it.uuid == uuid }
+            if (entry == null) {
+                sb.append("    ✗ 写完了但列表里没有它 —— 提交协议（metadata_tag）有问题\n")
+                return@withContext sb.toString()
+            }
+            sb.append("    列表读回：${entry.metadata.displayName}，时长未知=${!entry.metadata.durationKnown}\n")
+
+            // 逐块读回（每次 ≤64 KiB，跨块由 reader 自己按块边界拆）
+            val digest = MessageDigest.getInstance("SHA-256")
+            EncryptedFileReader.open(FileContainerChannel.openForRead(directory.cipherFile(uuid)), masterKey)
+                .use { reader ->
+                    var offset = 0L
+                    while (offset < reader.plaintextLength) {
+                        val n = minOf(64L * 1024, reader.plaintextLength - offset).toInt()
+                        digest.update(reader.read(offset, n))
+                        offset += n
+                    }
+                    sb.append("    读回明文 ${reader.plaintextLength} 字节（与写入一致=${reader.plaintextLength == size.toLong()}）\n")
+                }
+            val ok = digest.digest().contentEquals(expected)
+            sb.append(if (ok) "    ✓ SHA-256 一致：写→读整条路径在真机上成立。\n"
+                     else "    ✗ SHA-256 不一致！解密出来的字节和写进去的不是同一份。\n")
+            sb.toString()
+        } catch (e: VaultError) {
+            "[D] 自检失败：${e.javaClass.simpleName}: ${e.message}\n"
+        } catch (e: IOException) {
+            "[D] 自检失败（I/O）：${e.javaClass.simpleName}: ${e.message}\n"
         } finally {
             PasswordNormalizer.wipe(masterKey)
         }

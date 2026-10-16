@@ -44,7 +44,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * debug 专用诊断页。两件事，都回答「这个项目该不该按现在的设计继续做」：
+ * debug 专用诊断页。四件事：B/A 回答「设计前提成不成立」，C/D 回答「真机上的实现对不对」。
  *
  * **B · 私有目录可见性（T2，威胁模型门禁）**
  * 把一个**真实的视频**复制进 `getFilesDir()` 与 `getExternalFilesDir()`，
@@ -62,6 +62,12 @@ import java.io.File
  * 非 ASCII + emoji 密码）派生一次，与 fixture 里由 BouncyCastle 算出的主密钥逐字节比对。
  * 一致 ⇒「换平台也能解开」这条承诺在 Android 上真的成立；不一致 ⇒ 真机上根本解不开
  * JVM 侧写出来的仓库 —— 那必须在导入任何文件之前发现，否则用户的视频会永远打不开。
+ *
+ * **D · 仓库读写自检（需要先解锁）**
+ * 往真实仓库里写一个跨 2 块 + 短末块的合成条目，再逐块读回来核对 SHA-256。
+ * 起因：stage-1 的导入还没接通，而**空仓库对任何密码都放行** —— 没有条目就验证不了
+ * 列表、密码校验、锁定/解锁这条完整路径（真机上唯一能验的方式就是自己写一条进去）。
+ * 走的是生产同一套 `EncryptedFileWriter` / `EncryptedFileReader`，没有另开路径。
  *
  * 本页只在 debug 构建可达（入口在解锁页底部），且媒体读取权限只声明在
  * `app/src/debug/AndroidManifest.xml` —— release 不声明，因为正式版走 SAF，不需要读媒体库。
@@ -158,6 +164,29 @@ fun DebugProbeScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !isChecking
             ) { Text(if (isChecking) "正在派生（约 1–3 秒）…" else "跑跨实现自检") }
+
+            HorizontalDivider()
+
+            Text("D · 仓库读写自检（需要先解锁）", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "往仓库里写一个约 2 MB 的合成条目（跨 2 块 + 一个短末块），再读回来核对 SHA-256。" +
+                    "导入功能还没接通，而没有条目就验证不了列表、密码校验、锁定这条完整路径" +
+                    "（空仓库对任何密码都放行）。走的是生产同一套读写代码。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            var isWriting by remember { mutableStateOf(false) }
+            Button(
+                onClick = {
+                    isWriting = true
+                    scope.launch {
+                        append(VaultGateway.writeAndVerifyProbeEntry(context))
+                        isWriting = false
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isWriting
+            ) { Text(if (isWriting) "正在写入并读回…" else "写入合成条目并读回核对") }
 
             HorizontalDivider()
 
