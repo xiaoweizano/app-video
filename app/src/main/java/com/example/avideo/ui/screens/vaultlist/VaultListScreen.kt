@@ -5,64 +5,80 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.avideo.crypto.VaultGateway
 import com.example.avideo.ui.SkeletonBadge
 import com.example.avideo.ui.theme.*
-import kotlinx.coroutines.delay
 
 /**
  * 列表页 — 保险箱视频列表
+ *
+ * 列表数据是**真实的**：`VaultGateway.entries()` 枚举 `data/*.bin`、逐个解 metadata 区
+ * （不解任何数据块）。主密钥从 `KeyRepository` 取，取不到就拒绝显示并要求重新解锁。
+ *
+ * 仍未接的部分：导入（stage-1）、播放（stage-2）、删除（stage-1）。它们都在界面上如实标注，
+ * 不做「点了没反应」的假动作。
  *
  * DESIGN.md §2: 单一 FAB（导入），Top bar 承载导出/诊断
  * DESIGN.md §4: 状态徽章用 1dp 细线，不用色块填充
  * DESIGN.md §6: 无缩略图，用显示名+时长+状态承载信息
  */
-data class VaultEntry(
+data class VaultRow(
     val id: String,
     val displayName: String,
-    val durationMs: Long,
+    val durationMs: Long?,
     val status: EntryStatus
 )
 
 enum class EntryStatus {
-    HIDDEN,    // 已藏好
-    NOT_HIDDEN, // 尚未隐藏
-    FAILED     // 写入失败
+    HIDDEN,     // 已藏好
+    NOT_HIDDEN, // 尚未隐藏（源文件还在）—— stage-1 之后才会出现
+    FAILED      // 读不出来
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VaultListScreen(
+    /** 解锁时密码是否被真实文件**证明**过（空仓库无法校验，见 vault-unlock spec）。 */
+    passwordVerified: Boolean,
     onImport: () -> Unit,
     onExport: () -> Unit,
     onDiagnostics: () -> Unit,
     onPlay: (String) -> Unit,
+    onRequireUnlock: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var showDeleteDialog by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    var showDeleteNotice by remember { mutableStateOf<String?>(null) }
+    var isLoading by remember { mutableStateOf(true) }
+    // null = 未解锁（KeyRepository 里没有主密钥），空列表 = 仓库为空，两者必须分开呈现
+    var rows by remember { mutableStateOf<List<VaultRow>?>(emptyList()) }
 
-    var isLoading by remember { mutableStateOf(false) }
-    var entries by remember { mutableStateOf<List<VaultEntry>>(emptyList()) }
     LaunchedEffect(Unit) {
         isLoading = true
-        // TODO: 从真实vault数据源加载
-        delay(300L)
-        entries = listOf(
-            VaultEntry("1", " vacation_2024.mp4", 3600000L, EntryStatus.HIDDEN),
-            VaultEntry("2", " family_recording.mkv", 120000L, EntryStatus.NOT_HIDDEN),
-            VaultEntry("3", " private_clip.avi", 90000L, EntryStatus.HIDDEN),
-        )
+        rows = VaultGateway.entries(context)?.map { item ->
+            VaultRow(
+                id = item.uuid,
+                // 条目损坏时显示名解不出来。uuid 是结构性信息（不含原文件名），可以显示。
+                displayName = item.displayName ?: "无法读取的条目 ${item.uuid.take(8)}",
+                durationMs = item.durationMs,
+                status = if (item.corrupted) EntryStatus.FAILED else EntryStatus.HIDDEN,
+            )
+        }
         isLoading = false
     }
 
@@ -72,6 +88,14 @@ fun VaultListScreen(
             TopAppBar(
                 title = { Text("保险箱") },
                 actions = {
+                    // 主动锁定：清掉主密钥并回解锁页。同时也是测试「超时锁定」这条路径的入口
+                    // （否则要真的等 5 分钟后台）。
+                    IconButton(onClick = {
+                        VaultGateway.lock()
+                        onRequireUnlock()
+                    }) {
+                        Icon(Icons.Default.Lock, contentDescription = "锁定")
+                    }
                     IconButton(onClick = onExport) {
                         Icon(Icons.Default.ExitToApp, contentDescription = "导出")
                     }
@@ -91,8 +115,9 @@ fun VaultListScreen(
             }
         }
     ) { padding ->
-        if (isLoading) {
-            Box(
+        val loaded = rows
+        when {
+            isLoading -> Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding),
@@ -100,64 +125,69 @@ fun VaultListScreen(
             ) {
                 CircularProgressIndicator()
             }
-        } else if (entries.isEmpty()) {
-            EmptyVaultState(modifier = Modifier.padding(padding))
-        } else {
-            LazyColumn(
+
+            loaded == null -> LockedState(
+                modifier = Modifier.padding(padding),
+                onUnlock = onRequireUnlock,
+            )
+
+            loaded.isEmpty() -> EmptyVaultState(
+                modifier = Modifier.padding(padding),
+                passwordVerified = passwordVerified,
+            )
+
+            else -> LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // 标注：下面这三条是硬编码的示例数据。实测装上真机后确实会问「这几个视频是哪来的」，
-                // 所以把话说在界面上，而不是只写在代码注释里。
                 item {
-                    SkeletonBadge(text = "骨架 · 下面是硬编码的示例数据，不是你的视频（真实数据源未接）")
+                    SkeletonBadge(
+                        text = "下面是真实的仓库内容（枚举 data/ 得来）。" +
+                            "导入、播放、删除尚未接通：stage-1 / stage-2。"
+                    )
                 }
-                items(entries, key = { it.id }) { entry ->
-                    VaultEntryRow(
-                        entry = entry,
-                        onPlay = { onPlay(entry.id) },
-                        onDelete = { showDeleteDialog = entry.id }
+                items(loaded, key = { it.id }) { row ->
+                    VaultRowItem(
+                        row = row,
+                        onPlay = { onPlay(row.id) },
+                        onDelete = { showDeleteNotice = row.id }
                     )
                 }
             }
         }
     }
 
-    // 删除确认对话框
-    showDeleteDialog?.let { deleteId ->
+    // 删除尚未实现。这里刻意**不**显示一个「确定删除」的按钮 ——
+    // 一个点了什么都不会发生的确认框，是比没有删除功能更糟的体验。
+    showDeleteNotice?.let {
         AlertDialog(
-            onDismissRequest = { showDeleteDialog = null },
-            title = { Text("删除视频") },
-            text = { Text("确定要删除此视频吗？此操作不可恢复。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    showDeleteDialog = null
-                    // TODO: 删除逻辑
-                }) {
-                    Text("删除", color = MaterialTheme.colorScheme.error)
-                }
+            onDismissRequest = { showDeleteNotice = null },
+            title = { Text("删除还没接通") },
+            text = {
+                Text(
+                    "删除会在 stage-1 和导入一起做（要先确定「删除后不可恢复」在密文文件上意味着什么）。" +
+                        "现在点它不会有任何效果，你的文件没有被动过。"
+                )
             },
-            dismissButton = {
-                TextButton(onClick = { showDeleteDialog = null }) {
-                    Text("取消")
-                }
+            confirmButton = {
+                TextButton(onClick = { showDeleteNotice = null }) { Text("知道了") }
             }
         )
     }
 }
 
 @Composable
-private fun VaultEntryRow(
-    entry: VaultEntry,
+private fun VaultRowItem(
+    row: VaultRow,
     onPlay: () -> Unit,
     onDelete: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val colorScheme = MaterialTheme.colorScheme
-    val statusColor = when (entry.status) {
+    val statusColor = when (row.status) {
         EntryStatus.HIDDEN -> colorScheme.success
         EntryStatus.NOT_HIDDEN -> colorScheme.warning
         EntryStatus.FAILED -> colorScheme.error
@@ -181,7 +211,7 @@ private fun VaultEntryRow(
 
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = entry.displayName.trimStart(),
+                text = row.displayName,
                 style = MaterialTheme.typography.titleMedium,
                 color = colorScheme.onSurface,
                 maxLines = 1,
@@ -189,16 +219,16 @@ private fun VaultEntryRow(
             )
             Spacer(modifier = Modifier.height(4.dp))
             Row(verticalAlignment = Alignment.Bottom) {
+                // 时长未知时不编一个 0:00 出来（duration_ms 的哨兵值就是「未知」）
                 Text(
-                    text = formatDuration(entry.durationMs),
+                    text = row.durationMs?.let(::formatDuration) ?: "时长未知",
                     style = MaterialTheme.typography.labelMedium,
                     color = colorScheme.onSurfaceVariant,
                     fontWeight = FontWeight.W400
                 )
                 Spacer(modifier = Modifier.width(8.dp))
-                // 状态标签：1dp 细线下划线样式
                 Text(
-                    text = entry.status.label,
+                    text = row.status.label,
                     style = MaterialTheme.typography.labelSmall,
                     color = statusColor,
                     fontWeight = FontWeight.Medium
@@ -232,11 +262,48 @@ private val EntryStatus.label: String
     get() = when (this) {
         EntryStatus.HIDDEN -> "已藏好"
         EntryStatus.NOT_HIDDEN -> "尚未隐藏"
-        EntryStatus.FAILED -> "写入失败"
+        EntryStatus.FAILED -> "读不出来"
     }
 
+/**
+ * 未解锁：`KeyRepository.getMasterKey()` 返回 null。spec: key-repository
+ * 「getMasterKey() 返回 null 时，调用方 MUST 拒绝继续操作并提示未解锁」——
+ * 所以这里既不显示任何条目，也不尝试解密。
+ */
 @Composable
-private fun EmptyVaultState(modifier: Modifier = Modifier) {
+private fun LockedState(modifier: Modifier = Modifier, onUnlock: () -> Unit) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            text = "未解锁",
+            style = MaterialTheme.typography.titleLarge,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = "主密钥已从内存中清除（可能是切到后台超过 5 分钟，或你刚点了锁定）。" +
+                "重新输入密码即可继续。",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(24.dp))
+        Button(
+            onClick = onUnlock,
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+            shape = RoundedCornerShape(2.dp),
+        ) {
+            Text("去解锁")
+        }
+    }
+}
+
+@Composable
+private fun EmptyVaultState(modifier: Modifier = Modifier, passwordVerified: Boolean) {
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -251,12 +318,15 @@ private fun EmptyVaultState(modifier: Modifier = Modifier) {
             color = MaterialTheme.colorScheme.onSurface
         )
         Spacer(modifier = Modifier.height(16.dp))
-        // 三句话解释
-        val points = listOf(
-            "视频加密后存于 App 私有目录，其他应用无法读取。",
-            "密钥由你的密码派生，不绑定设备，换机仍可打开。",
-            "点击下方「+」导入第一个视频开始使用。"
-        )
+        val points = buildList {
+            add("视频加密后存于 App 私有目录，其他应用无法读取。")
+            add("密钥由你的密码派生，不绑定设备，换机仍可打开。")
+            add("点击下方「+」导入第一个视频开始使用。")
+            // spec: vault-unlock「空仓库的解锁不校验密码」——MUST NOT 声称密码已验证。
+            if (!passwordVerified) {
+                add("注意：仓库里还没有文件，所以刚才输入的密码没有被任何文件校验过。请确保你记住了它。")
+            }
+        }
         points.forEach { point ->
             Text(
                 text = point,

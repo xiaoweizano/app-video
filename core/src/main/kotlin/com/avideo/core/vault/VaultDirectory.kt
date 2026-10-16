@@ -6,7 +6,10 @@ import com.avideo.core.container.ContainerConstants
 import com.avideo.core.container.EncryptedFileReader
 import com.avideo.core.container.EncryptedFileWriter
 import com.avideo.core.container.FileContainerChannel
+import com.avideo.core.container.FixedHeader
 import com.avideo.core.crypto.KdfParams
+import com.avideo.core.crypto.KeyWrapping
+import com.avideo.core.crypto.PasswordNormalizer
 import com.avideo.core.crypto.RandomSource
 import com.avideo.core.errors.UncommittedFileError
 import com.avideo.core.errors.VaultError
@@ -151,10 +154,74 @@ class VaultDirectory(
         channelFactory(file).use { ContainerClassifier.classify(it) == ContainerClassifier.State.UNCOMMITTED }
     }
 
+    /**
+     * 抽样探测主密钥是否正确（spec: vault-unlock「解锁判定必须抽样多个文件」）。
+     *
+     * **只做「解包 wrapped_file_key」这一步**，因为那是整条读取链里唯一由主密钥自认证的操作
+     * （AES-GCM，128 位 tag）：解包成功**证明**主密钥正确——不存在「碰巧对上」；
+     * 解包失败则无法区分「密钥错」与「这 60 字节被损坏」，所以必须抽多个文件，
+     * 任意一个成功就足够（spec:「一个成功即证明密码正确」）。
+     *
+     * 为什么不拿 [list] 的 `Corrupted.reason` 反推：那是错误**类型名**，而
+     * 「哪种错误发生在解包之前」是 [EncryptedFileReader] 内部的语句顺序——结构错误在解包之前、
+     * header_tag 错误在解包之后。拿它判密码对错，等于把解锁绑定在另一处代码的执行顺序上，
+     * 那处顺序一改，解锁判定会**静默**变错。
+     *
+     * 空仓库返回 `sampled == 0`（密码无法校验），调用方 MUST NOT 因此拒绝进入——
+     * 否则用户永远导入不了第一个文件（spec: vault-unlock「空仓库的解锁不校验密码」）。
+     *
+     * 未提交的占位文件同样参与抽样：它们的固定头是**完整写过**的，解包照样成立，
+     * 于是「上次导入被杀、仓库里只有一个孤儿」时密码仍然可校验。
+     *
+     * @param masterKey MUST 是 32 字节；长度不对时 [KeyWrapping.unwrap] 抛 `IllegalArgumentException`
+     *   （不是 [VaultError]），会从这里直接传播出去——那是编程错误，不该被伪装成「探测失败」。
+     */
+    fun probeMasterKey(masterKey: ByteArray): MasterKeyProbe {
+        val files = cipherFiles()
+        if (files.isEmpty()) return MasterKeyProbe(sampled = 0, unwrapped = 0)
+        val sample = sampleOf(files, PROBE_SAMPLE_MAX)
+        var unwrapped = 0
+        for (file in sample) if (unwrapsFileKey(file, masterKey)) unwrapped++
+        return MasterKeyProbe(sampled = sample.size, unwrapped = unwrapped)
+    }
+
+    /** 等距取样：只取前几个的话，「前几个恰好损坏」的仓库会被误判成「密码错」。 */
+    private fun sampleOf(files: List<File>, limit: Int): List<File> {
+        if (files.size <= limit) return files
+        val step = files.size.toDouble() / limit
+        return (0 until limit).map { files[(it * step).toInt()] }
+    }
+
+    /** 只读固定头这 81 字节，不碰数据区，不碰 metadata。 */
+    private fun unwrapsFileKey(file: File, masterKey: ByteArray): Boolean {
+        var channel: ContainerChannel? = null
+        return try {
+            channel = channelFactory(file)
+            val headerBytes = ByteArray(ContainerConstants.FIXED_HEADER_LEN)
+            if (channel.readAt(0L, headerBytes, headerBytes.size) != headerBytes.size) return false
+            PasswordNormalizer.wipe(KeyWrapping.unwrap(masterKey, FixedHeader.decode(headerBytes).wrappedFileKey))
+            true
+        } catch (e: VaultError) {
+            false                                    // 结构坏了 / 解包失败：这一份证明不了任何事
+        } catch (e: IOException) {
+            false                                    // 文件消失、被占用等：同样只影响这一次探测
+        } finally {
+            // 关不掉的探测通道不该让解锁失败——它只是没被及时释放。
+            runCatching { channel?.close() }
+        }
+    }
+
     companion object {
         const val DATA_DIR = "data"
         const val SUFFIX = ".bin"
         const val DEFAULT_METADATA_LEN = ContainerConstants.METADATA_LEN
+
+        /**
+         * [probeMasterKey] 的抽样上限。1000 个文件的仓库也必须只读几个文件头
+         * （spec: vault-unlock「抽样有上限：MUST NOT 尝试全部」）。
+         * 每次抽样只是一次 81 字节的读取 + 一次 AES-GCM 解包，代价与仓库大小无关。
+         */
+        const val PROBE_SAMPLE_MAX = 5
 
         /**
          * 规范的 8-4-4-4-12 十六进制 UUID。**全串匹配**（[Regex.matches] 要求整个字符串吻合），
@@ -165,9 +232,21 @@ class VaultDirectory(
     }
 }
 
+/**
+ * [VaultDirectory.probeMasterKey] 的结果。
+ *
+ * 只含计数，不含任何密钥材料或文件名 —— 它可以出现在日志与错误提示里。
+ */
+data class MasterKeyProbe(val sampled: Int, val unwrapped: Int) {
+    /** 至少一个文件解包成功 ⇒ 主密钥被**证明**正确（不是「大概对」）。 */
+    val keyProven: Boolean get() = unwrapped > 0
+
+    /** 一个文件都没抽到（空仓库）：密码**无法**被校验，系统 MUST NOT 声称已验证。 */
+    val unverifiable: Boolean get() = sampled == 0
+}
+
 /** 列表条目。 */
-sealed class VaultEntry {
-    abstract val uuid: String
+sealed class VaultEntry {    abstract val uuid: String
     abstract val file: File
 
     data class Committed(

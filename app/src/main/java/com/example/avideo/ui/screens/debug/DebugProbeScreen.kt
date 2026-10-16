@@ -31,12 +31,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.avideo.core.crypto.KdfParams
+import com.example.avideo.crypto.VaultGateway
+import kotlinx.coroutines.launch
 import java.io.File
 
 /**
@@ -52,6 +56,12 @@ import java.io.File
  * **A · 视频格式普查（T0 尽调的事实部分）**
  * 统计媒体库里按扩展名的分布与占用。它决定 libVLC 那 41 MB 值不值得：
  * 冷门格式（rmvb/avi 等）占比很低的话，换 Media3/ExoPlayer 能把 APK 从 ~36 MB 降到 ~8 MB。
+ *
+ * **C · 跨实现自检（F6.1，唯一能在真机上验证的格式承诺）**
+ * 用真机的 argon2kt 按 `core/src/test/resources/fixtures` 里那份 vector（生产参数、
+ * 非 ASCII + emoji 密码）派生一次，与 fixture 里由 BouncyCastle 算出的主密钥逐字节比对。
+ * 一致 ⇒「换平台也能解开」这条承诺在 Android 上真的成立；不一致 ⇒ 真机上根本解不开
+ * JVM 侧写出来的仓库 —— 那必须在导入任何文件之前发现，否则用户的视频会永远打不开。
  *
  * 本页只在 debug 构建可达（入口在解锁页底部），且媒体读取权限只声明在
  * `app/src/debug/AndroidManifest.xml` —— release 不声明，因为正式版走 SAF，不需要读媒体库。
@@ -127,6 +137,30 @@ fun DebugProbeScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
 
             HorizontalDivider()
 
+            Text("C · 跨实现自检（真机 argon2kt 对 fixture）", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "用生产参数在同一台手机上派生一次 fixture 里的密码，与 BouncyCastle 算出的主密钥比对。" +
+                    "一致 = Android 与 JVM 产出同一份字节，「换机/换平台还能解开」成立；" +
+                    "不一致 = 真机解不开 JVM 写的仓库，必须在导入第一个视频之前修掉。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            var isChecking by remember { mutableStateOf(false) }
+            val scope = rememberCoroutineScope()
+            Button(
+                onClick = {
+                    isChecking = true
+                    scope.launch {
+                        append(crossImplementationSelfTest())
+                        isChecking = false
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isChecking
+            ) { Text(if (isChecking) "正在派生（约 1–3 秒）…" else "跑跨实现自检") }
+
+            HorizontalDivider()
+
             Text("输出", style = MaterialTheme.typography.titleSmall)
             SelectionContainer {
                 Text(
@@ -139,8 +173,55 @@ fun DebugProbeScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     }
 }
 
-private fun displayNameOf(context: Context, uri: Uri): String {
-    context.contentResolver
+/**
+ * 与 `core/src/test/resources/fixtures/vector.properties` 对齐的三个常量。
+ *
+ * 刻意**复制**而不是读取：fixture 在 `:core` 的 **test** 资源里，不会被打进 APK。
+ * 代价是它可能过期 —— fixture 重新生成（`./gradlew :core:generateFixtures`）后这三个值要同步。
+ * 过期时的表现是自检报「不一致」，也就是**响亮地失败**，而不是静默通过。
+ */
+private const val FIXTURE_PASSWORD = "café-密码-🔒"
+private const val FIXTURE_SALT_HEX = "0358d39219b51e489e7d24b05bdca84d"
+private const val FIXTURE_MASTER_KEY_HEX = "5b3af832d590f593201857ad3e50e31c36d2d04a852bf557a50b43a844092c66"
+
+/**
+ * 在真机上跑一次跨实现自检。走的是生产同一条路径（`VaultGateway` 里的 NFC + argon2kt），
+ * 所以这个结论能覆盖生产。
+ */
+private suspend fun crossImplementationSelfTest(): String = try {
+    val salt = hexToBytes(FIXTURE_SALT_HEX)
+    val started = System.currentTimeMillis()
+    val derived = VaultGateway.deriveForSelfTest(
+        FIXTURE_PASSWORD.toCharArray(),
+        salt,
+        KdfParams.PRODUCTION,
+    )
+    val elapsed = System.currentTimeMillis() - started
+    val actual = derived.joinToString("") { "%02x".format(it) }
+
+    val sb = StringBuilder("[C] 跨实现自检（Argon2id m=64MiB t=3 p=1，耗时 ${elapsed}ms）\n")
+    sb.append("    期望 $FIXTURE_MASTER_KEY_HEX\n")
+    sb.append("    实际 $actual\n")
+    if (actual == FIXTURE_MASTER_KEY_HEX) {
+        sb.append("    ✓ 一致：真机的 argon2kt 与 BouncyCastle/JVM 产出同一份字节，换平台能解开。\n")
+    } else {
+        sb.append(
+            "    ✗ 不一致：真机解不开 JVM 写的仓库，**先别导入任何视频**。\n" +
+                "      排查顺序：① 参数是否传全（argon2kt 默认 t=1/p=2，与生产不同）" +
+                "② 版本必须是 V13 ③ 密码要按 UTF-8 编码、且经过 NFC。\n"
+        )
+    }
+    sb.toString()
+} catch (e: Throwable) {
+    // 自检本身崩了也要有输出：这条路径最可能的崩法是 .so 没打进 APK（UnsatisfiedLinkError）
+    "[C] 自检崩了：${e::class.java.name}: ${e.message}\n"
+}
+
+private fun hexToBytes(hex: String): ByteArray = ByteArray(hex.length / 2) {
+    ((Character.digit(hex[it * 2], 16) shl 4) or Character.digit(hex[it * 2 + 1], 16)).toByte()
+}
+
+private fun displayNameOf(context: Context, uri: Uri): String {    context.contentResolver
         .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
         ?.use { cursor ->
             if (cursor.moveToFirst()) {

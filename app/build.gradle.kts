@@ -60,6 +60,16 @@ android {
 
 dependencies {
     implementation(project(":ui"))
+
+    // 容器格式与加解密核心（纯 Kotlin/JVM 模块，见 openspec stage-0）。
+    // 排除 argon2-jvm 与其 JNA：:core 用它做 JVM 侧 KDF，但 Android 侧走下面的 argon2kt；
+    // JNA 打包的那六个平台原生库（win32/linux/darwin…）进 APK 毫无用处。
+    // 注：排除只影响运行时；:core 自己的编译类路径不受影响。若谁在 Android 上误调
+    // MasterKeyDeriver.forJvmOnly()，现在会以 NoClassDefFoundError 响亮失败（而不是静默降级）。
+    implementation(project(":core")) {
+        exclude(group = "de.mkammerer")
+        exclude(group = "net.java.dev.jna")
+    }
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.activity:activity-compose:1.8.2")
@@ -82,13 +92,13 @@ dependencies {
     // libVLC for playback
     implementation("org.videolan.android:libvlc-all:3.6.5")
 
-    // Argon2id KDF —— 这里原本是 com.github.Aidoop:argon2-android:1.4.0（来自 jitpack）。
-    // 暂移除，两个理由：
-    //   1) 全仓库没有任何代码引用它（只有注释里提到 argon2id）；
-    //   2) 它来自 jitpack —— jitpack 按需现场构建，CI 上经常慢或失败，会让构建不稳定。
-    // stage-1 接 Android KDF 时应改为设计文档指定的实现：
-    //   implementation("com.lambdapioneer.argon2kt:argon2kt:<版本>")   // Maven Central
-    // 并且必须通过 :core 的 KeyDerivation 接口注入（见 MasterKeyDeriver，注意 MUST NOT 调用 forJvmOnly()）。
+    // Argon2id KDF（**Android 侧实现**）。这里原本是 com.github.Aidoop:argon2-android:1.4.0（jitpack），
+    // 全仓库无人引用且 jitpack 按需现场构建不稳定，已移除。
+    // 现在用设计文档指定的 argon2kt（NDK 编译的 .so，Maven Central）。
+    // 关键：它必须与 :core 的 argon2-jvm 产出**相同的 32 字节**，否则换平台解不开。
+    // 由 T7 的跨实现 fixture 守住；参数必须显式传全 ——
+    // argon2kt 的默认值是 t=1 / p=2，与我们的生产参数 (t=3, p=1) 不同，不能依赖默认值。
+    implementation("com.lambdapioneer.argon2kt:argon2kt:1.6.0")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
