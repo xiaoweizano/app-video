@@ -43,10 +43,38 @@ fun ExportScreen(
     var progress by remember { mutableStateOf<Pair<Long, Long>?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var pendingUuid by remember { mutableStateOf<String?>(null) }
+    var backingUp by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         items = VaultGateway.entries(context)
         loaded = true
+    }
+
+    val backupCreator = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        if (uri == null) {
+            message = "已取消备份，没有写出任何文件"
+            return@rememberLauncherForActivityResult
+        }
+        scope.launch {
+            backingUp = true
+            val result = runCatching {
+                context.contentResolver.openOutputStream(uri)?.use { sink ->
+                    VaultGateway.exportVaultArchive(context, sink)
+                } ?: throw IllegalStateException("打不开目标文件")
+            }
+            backingUp = false
+            message = result.fold(
+                onSuccess = { report ->
+                    "已备份 ${report.entries} 个文件（${formatBytes(report.bytes)}）" +
+                        if (report.skippedUncommitted > 0) {
+                            "；跳过 ${report.skippedUncommitted} 个未提交/损坏文件"
+                        } else ""
+                },
+                onFailure = { "备份失败：${it.javaClass.simpleName}" },
+            )
+        }
     }
 
     val creator = rememberLauncherForActivityResult(
@@ -96,8 +124,31 @@ fun ExportScreen(
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Card(
+            // 备份整个仓库：脱离本机的唯一方式（内容是密文，不含密钥）
+            FilledTonalButton(
+                onClick = {
+                    message = null
+                    backupCreator.launch(
+                        "vault-" + java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US)
+                            .format(java.util.Date()) + ".avault.zip"
+                    )
+                },
+                enabled = !backingUp && progress == null,
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            ) {
+                Text(
+                    if (backingUp) "正在备份…" else "备份整个仓库（.avault.zip）"
+                )
+            }
+            Text(
+                "备份出来的是原样的密文：不含密钥，也只能用原来的密码解开。" +
+                    "换手机/重装前先做这一份 —— 卸载 App 会连同仓库一起删除。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.warning.copy(alpha = 0.12f)
                 ),
@@ -173,7 +224,7 @@ fun ExportScreen(
                                 }
                             }
                             TextButton(
-                                enabled = !item.corrupted && progress == null,
+                                enabled = !item.corrupted && progress == null && !backingUp,
                                 onClick = {
                                     pendingUuid = item.uuid
                                     message = null

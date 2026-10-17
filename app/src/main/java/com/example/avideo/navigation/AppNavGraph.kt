@@ -45,7 +45,9 @@ fun AppNavGraph(
                         popUpTo(Screen.Unlock.route) { inclusive = true }
                     }
                 },
-                onDebug = { navController.navigate(Screen.Debug.route) }
+                onDebug = { navController.navigate(Screen.Debug.route) },
+                // 诊断与恢复都在解锁之前可达：仓库打不开时正是最需要它们的时候
+                onDiagnostics = { navController.navigate(Screen.Diagnostics.route) },
             )
         }
 

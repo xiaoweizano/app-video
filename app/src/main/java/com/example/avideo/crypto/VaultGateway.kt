@@ -1,6 +1,9 @@
 package com.example.avideo.crypto
 
 import android.content.Context
+import com.example.avideo.BuildConfig
+import com.avideo.core.backup.VaultArchive
+import com.avideo.core.container.ContainerClassifier
 import com.avideo.core.container.ContainerConstants
 import com.avideo.core.container.EncryptedFileReader
 import com.avideo.core.container.FileContainerChannel
@@ -21,6 +24,7 @@ import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.io.OutputStream
 import java.security.MessageDigest
 
@@ -349,6 +353,109 @@ object VaultGateway {
             com.example.avideo.playback.PlaybackPositionStore.clear(context, uuid)
         }
         deleted
+    }
+
+    /**
+     * 把整个仓库写成 `.avault.zip`（**只读**操作，不修改仓库）。
+     *
+     * 这是卸载/换机前唯一的逃生通道，内容就是原样的密文 —— 不含任何密钥，
+     * 恢复后仍然只认原来的密码。
+     */
+    suspend fun exportVaultArchive(context: Context, sink: OutputStream): VaultArchive.WriteReport =
+        withContext(Dispatchers.IO) { VaultArchive.write(vaultDir(context), sink) }
+
+    /**
+     * 从归档恢复。
+     *
+     * 恢复成功后**必须清掉内存里的主密钥**：仓库已经被换掉了，旧会话的密钥属于旧仓库，
+     * 留着它去解新条目只会得到「密码错」—— 正确的做法是让用户用归档对应密码重新解锁。
+     *
+     * @param allowOverwrite 已有仓库时是否覆盖。调用方 MUST 先问过用户（spec: vault-restore）。
+     */
+    suspend fun restoreVaultArchive(
+        context: Context,
+        source: InputStream,
+        allowOverwrite: Boolean,
+    ): VaultArchive.RestoreResult = withContext(Dispatchers.IO) {
+        // 不带密钥做抽样：此刻手上的密钥属于**旧**仓库，拿它去校验新仓库只会误报。
+        val result = VaultArchive.restore(source, vaultDir(context), allowOverwrite, masterKey = null)
+        if (result is VaultArchive.RestoreResult.Success) {
+            KeyRepository.clear()
+            sessionPasswordProven = false
+        }
+        result
+    }
+
+    /**
+     * 诊断报告文本。**不需要解锁**（仓库打不开时恰恰是最需要它的时候）。
+     *
+     * spec 的允许清单：格式版本、文件数量、每个文件头部校验结果、KDF 参数、
+     * 两份边车各自的状态、应用/系统/ABI 版本。
+     * 禁止清单：密码、主密钥、data key、明文文件名、密文字节、可推断内容的路径。
+     * 因此这里**只出现 uuid**，不出现显示名，也不出现任何绝对路径。
+     */
+    suspend fun diagnosticsReport(context: Context): String = withContext(Dispatchers.IO) {
+        val app = context.applicationContext
+        val dir = vaultDir(app)
+        val directory = VaultDirectory(dir)
+        val (metaOk, bakOk) = VaultMetaIO.integrityOf(dir)
+        val loaded = VaultMetaIO.load(dir)
+
+        val sb = StringBuilder()
+        sb.appendLine("== AmiVault 诊断报告 ==")
+        sb.appendLine("生成时间: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())}")
+        sb.appendLine("应用: ${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})")
+        sb.appendLine("Android: ${android.os.Build.VERSION.RELEASE} (SDK ${android.os.Build.VERSION.SDK_INT})")
+        sb.appendLine("ABI: ${android.os.Build.SUPPORTED_ABIS.joinToString(", ")}")
+        sb.appendLine("设备: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
+        sb.appendLine()
+        sb.appendLine("仓库目录存在: ${dir.isDirectory}")
+        sb.appendLine("vault.meta 存在且通过校验: $metaOk")
+        sb.appendLine("vault.meta.bak 存在且通过校验: $bakOk")
+        when (loaded) {
+            is VaultMetaIO.LoadResult.Ok -> sb.appendLine("读取结果: 可用${if (loaded.fromBackup) "（来自 .bak）" else ""}")
+            is VaultMetaIO.LoadResult.BothValid -> sb.appendLine("读取结果: 两份都可用但不一致（将使用主文件）")
+            VaultMetaIO.LoadResult.Corrupted -> sb.appendLine("读取结果: 两份都不可用（仓库元数据损坏）")
+        }
+        val meta = when (loaded) {
+            is VaultMetaIO.LoadResult.Ok -> loaded.meta
+            is VaultMetaIO.LoadResult.BothValid -> loaded.primary
+            VaultMetaIO.LoadResult.Corrupted -> null
+        }
+        if (meta != null) {
+            sb.appendLine("容器格式版本: ${meta.version}")
+            sb.appendLine("KDF: Argon2id m=${meta.kdfParams.memoryKib} KiB t=${meta.kdfParams.iterations} p=${meta.kdfParams.parallelism}")
+        }
+        sb.appendLine()
+
+        var committed = 0
+        var uncommitted = 0
+        var malformed = 0
+        val detail = StringBuilder()
+        directory.cipherFiles().forEach { file ->
+            val uuid = file.name.removeSuffix(VaultDirectory.SUFFIX)
+            val state = try {
+                FileContainerChannel.openForRead(file).use { ContainerClassifier.classify(it) }
+            } catch (e: IOException) {
+                ContainerClassifier.State.MALFORMED
+            }
+            when (state) {
+                ContainerClassifier.State.COMMITTED -> committed++
+                ContainerClassifier.State.UNCOMMITTED -> uncommitted++
+                ContainerClassifier.State.MALFORMED -> malformed++
+            }
+            detail.appendLine("  $uuid  ${state.name}  ${file.length()} B")
+        }
+        sb.appendLine("条目总数: ${directory.cipherFiles().size}")
+        sb.appendLine("  已提交: $committed")
+        sb.appendLine("  未提交: $uncommitted")
+        sb.appendLine("  结构损坏: $malformed")
+        sb.appendLine()
+        sb.appendLine("逐条头部校验（uuid / 结果 / 密文大小）:")
+        sb.append(detail)
+        sb.appendLine()
+        sb.appendLine("说明: 「已提交」只表示 metadata_tag 非全零，带密钥的完整性在播放/导出时验证。")
+        sb.toString()
     }
 
     /** 主动锁定（退出、切后台超时）。 */

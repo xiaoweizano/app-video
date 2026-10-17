@@ -71,6 +71,14 @@ enum class DuplicateChoice {
  * （spec 要求报重复时指出对方是谁）。
  */
 data class DedupMatch(
+    /** 库内已有条目的 uuid；同批重复时为**空串**（那时还没有 uuid）。 */
     val existingUuid: String,
     val existingName: String,
+    /**
+     * true = 重复对象是**同一批里的另一个源**，而不是库里的条目。
+     *
+     * 这种情况下「替换」没有意义（没有旧条目可删）：界面 MUST 只提供「跳过 / 保留两份」，
+     * 管线也会把误传进来的 REPLACE 当作 SKIP 处理（宁可少写一份，也不要删错东西）。
+     */
+    val inBatch: Boolean = false,
 )

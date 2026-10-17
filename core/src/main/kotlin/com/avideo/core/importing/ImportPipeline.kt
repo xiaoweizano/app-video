@@ -95,12 +95,22 @@ class ImportPipeline(
      */
     fun findDuplicates(masterKey: ByteArray, sources: List<ImportSource>): List<DuplicateCandidate> {
         val index = directory.indexEntries(masterKey)
-        if (index.isEmpty()) return emptyList()
+        // 同一批里也可能有两份内容相同的文件（用户一次选了两个副本）。
+        // 它们互相之间同样要判重，只是「重复对象」不是库内条目 —— 用 inBatch 标记。
+        val batchSizeCounts = sources.mapNotNull { it.statedSize }.groupingBy { it }.eachCount()
+        val seenInBatch = HashMap<String, ImportSource>()
+
         return sources.mapNotNull { source ->
-            val candidates = source.statedSize
-                ?.let { size -> index.filter { it.plaintextLength == size } }
-                ?: index
-            if (candidates.isEmpty()) return@mapNotNull null
+            val size = source.statedSize
+            val vaultCandidates = if (size == null) index else index.filter { it.plaintextLength == size }
+            // 需要哈希的两种情况：库内长度撞车，或同批里有另一个同长度的源。
+            val sharesSizeInBatch = if (size == null) {
+                sources.size > 1                      // 声明大小未知：只能保守地算一遍
+            } else {
+                (batchSizeCounts[size] ?: 0) > 1
+            }
+            if (vaultCandidates.isEmpty() && !sharesSizeInBatch) return@mapNotNull null
+
             val sha = try {
                 sha256Of(source)
             } catch (e: IOException) {
@@ -108,8 +118,23 @@ class ImportPipeline(
             } catch (e: VaultError) {
                 return@mapNotNull null
             }
-            val hit = candidates.firstOrNull { it.sha256.contentEquals(sha) } ?: return@mapNotNull null
-            DuplicateCandidate(source, DedupMatch(existingUuid = hit.uuid, existingName = hit.displayName))
+            val shaKey = sha.joinToString("") { "%02x".format(it) }
+            val previousInBatch = seenInBatch.put(shaKey, source)
+
+            // 库内优先：与已有条目重复时，提示里要指出的是库里那一条。
+            index.firstOrNull { it.sha256.contentEquals(sha) }?.let { hit ->
+                return@mapNotNull DuplicateCandidate(
+                    source,
+                    DedupMatch(existingUuid = hit.uuid, existingName = hit.displayName, inBatch = false),
+                )
+            }
+            previousInBatch?.let { earlier ->
+                return@mapNotNull DuplicateCandidate(
+                    source,
+                    DedupMatch(existingUuid = "", existingName = earlier.displayName, inBatch = true),
+                )
+            }
+            null
         }
     }
 
@@ -142,9 +167,14 @@ class ImportPipeline(
         val source = request.source
         val label = source.label
 
-        // ① 用户选了跳过 ⇒ 一个字节都不写（spec: duplicate-detection）
-        if (request.choice == DuplicateChoice.SKIP) {
-            return ImportOutcome.Skipped(label, "与已有条目「${request.duplicate?.existingName}」内容相同，已跳过")
+        // ① 用户选了跳过 ⇒ 一个字节都不写（spec: duplicate-detection）。
+        //    同批重复即使误传 REPLACE 也按 SKIP 处理：没有旧条目可删，删错就是数据丢失。
+        val inBatchReplace = request.choice == DuplicateChoice.REPLACE &&
+            request.duplicate?.inBatch == true
+        if (request.choice == DuplicateChoice.SKIP || inBatchReplace) {
+            val who = request.duplicate?.existingName
+            val scope = if (request.duplicate?.inBatch == true) "同一批里的" else "已有条目"
+            return ImportOutcome.Skipped(label, "与$scope「$who」内容相同，已跳过")
         }
         // ② 声明为 0 字节 ⇒ 开流之前就拒绝（spec: import-flow）
         if (source.statedSize == 0L) {

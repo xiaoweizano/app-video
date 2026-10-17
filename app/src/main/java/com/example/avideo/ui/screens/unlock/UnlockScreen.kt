@@ -1,5 +1,8 @@
 package com.example.avideo.ui.screens.unlock
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -20,6 +23,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import com.avideo.core.backup.VaultArchive
 import com.example.avideo.BuildConfig
 import com.example.avideo.crypto.UnlockOutcome
 import com.example.avideo.crypto.VaultGateway
@@ -48,11 +52,15 @@ fun UnlockScreen(
     /** 参数 = 密码是否被真实文件**证明**过（空仓库为 false，见文件头注释）。 */
     onUnlocked: (passwordVerified: Boolean) -> Unit,
     onDebug: () -> Unit,
+    /** 诊断页。**不需要解锁**就能进 —— 仓库打不开时恰恰最需要它。 */
+    onDiagnostics: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    // 只在进入这一屏时读一次（两次 37 字节，不跑 KDF）
-    val vaultState = remember { VaultGateway.state(context) }
+    // 读两次 37 字节的边车，不跑 KDF。恢复备份后 stateTick++ 让它重新判定
+    // 「首次设置」还是「解锁」。
+    var stateTick by remember { mutableStateOf(0) }
+    val vaultState = remember(stateTick) { VaultGateway.state(context) }
     val isFirstRun = vaultState == VaultState.NotCreated
 
     var password by remember { mutableStateOf("") }
@@ -61,8 +69,38 @@ fun UnlockScreen(
     var fieldError by remember { mutableStateOf<String?>(null) }
     var outcomeError by remember { mutableStateOf<OutcomeError?>(null) }
     var isWorking by remember { mutableStateOf(false) }
+    var pendingRestore by remember { mutableStateOf<Uri?>(null) }
+    var restoring by remember { mutableStateOf(false) }
+    var restoreMessage by remember { mutableStateOf<String?>(null) }
 
     val scope = rememberCoroutineScope()
+
+    val restorePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri -> if (uri != null) pendingRestore = uri }
+
+    fun startRestore(uri: Uri) {
+        restoring = true
+        restoreMessage = null
+        scope.launch {
+            val result = runCatching {
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    VaultGateway.restoreVaultArchive(context, input, allowOverwrite = true)
+                } ?: error("打不开备份文件")
+            }
+            restoring = false
+            restoreMessage = when (val outcome = result.getOrNull()) {
+                is VaultArchive.RestoreResult.Success -> {
+                    stateTick++
+                    "恢复完成：${outcome.entries} 个条目" +
+                        (if (outcome.usedBackupMeta) "（用了 vault.meta.bak）" else "") +
+                        "。请用做这份备份时的密码解锁。"
+                }
+                is VaultArchive.RestoreResult.Failed -> "恢复失败：${outcome.reason}"
+                null -> "恢复失败：${result.exceptionOrNull()?.javaClass?.simpleName}"
+            }
+        }
+    }
     val colorScheme = MaterialTheme.colorScheme
 
     // 进入时两份边车就已经都过不了 CRC32：先把话说明白，别让用户以为是密码问题。
@@ -100,6 +138,29 @@ fun UnlockScreen(
                 is UnlockOutcome.Failed -> outcomeError = OutcomeError.Other(outcome.detail)
             }
         }
+    }
+
+    pendingRestore?.let { uri ->
+        AlertDialog(
+            onDismissRequest = { pendingRestore = null },
+            title = { Text("从备份恢复？") },
+            text = {
+                Text(
+                    "会用备份里的仓库替换当前的" +
+                        (if (vaultState == VaultState.NotCreated) "空仓库" else "仓库（现有条目会全部消失）") +
+                        "，不可撤销。恢复后请用做这份备份时的密码解锁。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingRestore = null
+                    startRestore(uri)
+                }) { Text("恢复", color = colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRestore = null }) { Text("取消") }
+            }
+        )
     }
 
     // 外层 Box 负责居中，内层 Column 负责滚动。
@@ -234,7 +295,34 @@ fun UnlockScreen(
 
         outcomeError?.let { error ->
             Spacer(modifier = Modifier.height(16.dp))
-            ErrorCard(error, onDiagnostics = onDebug)
+            // 损坏卡片上的「打开诊断页」现在指向真正的诊断页（原来指向 debug 探针）
+            ErrorCard(error, onDiagnostics = onDiagnostics)
+        }
+
+        // 诊断与恢复都必须在**解锁之前**可达：
+        // 「仓库打不开」正是最需要看诊断、或干脆从备份恢复的时候。
+        Spacer(modifier = Modifier.height(24.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = onDiagnostics) {
+                Text("诊断", style = MaterialTheme.typography.labelSmall)
+            }
+            TextButton(
+                onClick = { restorePicker.launch(arrayOf("*/*")) },
+                enabled = !restoring,
+            ) {
+                Text(
+                    if (restoring) "正在恢复…" else "从备份恢复",
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+        }
+        restoreMessage?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 24.dp),
+            )
         }
 
         // debug 专用入口：那两个探针（私有目录可见性 / 格式普查）跟密码无关，

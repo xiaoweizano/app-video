@@ -192,6 +192,9 @@ object ImportController {
         }
     }
 
+    /** 是否有导入正在写入。导出前 MUST 检查（spec: vault-export「导出与导入互斥」）。 */
+    fun isRunning(): Boolean = busy
+
     /** 用户退出导入页时调用：把状态收回 Idle（结果已经显示过了）。 */
     fun finish() {
         _state.value = State.Idle

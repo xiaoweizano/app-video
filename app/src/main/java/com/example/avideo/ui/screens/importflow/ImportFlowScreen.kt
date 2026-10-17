@@ -19,6 +19,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.avideo.core.importing.DuplicateCandidate
 import com.avideo.core.importing.DuplicateChoice
+import com.example.avideo.importing.CloudBackupProbe
+import com.example.avideo.importing.CloudState
 import com.example.avideo.importing.ImportController
 import com.example.avideo.ui.theme.*
 
@@ -44,6 +46,7 @@ fun ImportFlowScreen(
 ) {
     val context = LocalContext.current
     val state by ImportController.state.collectAsState()
+    var cloudStates by remember { mutableStateOf<List<CloudState>>(emptyList()) }
 
     // 显式构造 ACTION_OPEN_DOCUMENT，而不是用 ActivityResultContracts.OpenMultipleDocuments：
     // 后者不带 FLAG_GRANT_WRITE_URI_PERMISSION，于是 cleanup 里的 deleteDocument 几乎必然
@@ -60,7 +63,11 @@ fun ImportFlowScreen(
             else -> emptyList()
         }
         // 空选择 MUST NOT 产生任何写盘动作，也不报错（spec: import-flow「空选择」）
-        if (uris.isNotEmpty()) ImportController.prepare(context, uris)
+        if (uris.isNotEmpty()) {
+            // 云端探测是尽力而为的启发式，失败一律算「无法判断」，绝不影响导入。
+            cloudStates = uris.map { CloudBackupProbe.probe(context, it) }
+            ImportController.prepare(context, uris)
+        }
     }
 
     fun launchPicker() {
@@ -105,7 +112,7 @@ fun ImportFlowScreen(
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            CloudBackupWarning()
+            CloudBackupWarning(cloudStates)
 
             when (val current = state) {
                 ImportController.State.Idle -> {
@@ -191,14 +198,24 @@ private fun DedupDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "「${candidate.source.displayName}」与库里的「${candidate.match.existingName}」" +
-                        "内容完全相同（按内容哈希判断，不是按文件名）。",
+                    if (candidate.match.inBatch) {
+                        "「${candidate.source.displayName}」与同一批里的「${candidate.match.existingName}」" +
+                            "内容完全相同（按内容哈希判断，不是按文件名）。"
+                    } else {
+                        "「${candidate.source.displayName}」与库里的「${candidate.match.existingName}」" +
+                            "内容完全相同（按内容哈希判断，不是按文件名）。"
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Text(
-                    "跳过 = 保留库里的「${candidate.match.existingName}」，不导入这一份。\n" +
-                        "替换 = 用这次的显示名替换掉它。\n" +
-                        "保留两份 = 两条都留着（内容相同，占两份空间）。",
+                    if (candidate.match.inBatch) {
+                        "跳过 = 只导入同一批里的那一份，不导入这一份。\n" +
+                            "保留两份 = 两条都留着（内容相同，占两份空间）。"
+                    } else {
+                        "跳过 = 保留库里的「${candidate.match.existingName}」，不导入这一份。\n" +
+                            "替换 = 用这次的显示名替换掉它。\n" +
+                            "保留两份 = 两条都留着（内容相同，占两份空间）。"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -217,7 +234,10 @@ private fun DedupDialog(
         dismissButton = {
             Row {
                 TextButton(onClick = { onChoose(DuplicateChoice.SKIP) }) { Text("跳过") }
-                TextButton(onClick = { onChoose(DuplicateChoice.REPLACE) }) { Text("替换") }
+                // 同批重复没有「旧条目」可替换，MUST NOT 给这个选项
+                if (!candidate.match.inBatch) {
+                    TextButton(onClick = { onChoose(DuplicateChoice.REPLACE) }) { Text("替换") }
+                }
             }
         },
     )
@@ -302,7 +322,7 @@ private fun RowItem(row: ImportController.Row) {
 }
 
 @Composable
-private fun CloudBackupWarning() {
+private fun CloudBackupWarning(states: List<CloudState>) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -321,6 +341,13 @@ private fun CloudBackupWarning() {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            CloudBackupProbe.summarize(states)?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Text(
                 "Android 没有可靠接口能查「某个文件是否已上传」，所以这里只能提醒，不能替你确认。" +
                     "导入后请自行到对应云相册里看一眼。",
