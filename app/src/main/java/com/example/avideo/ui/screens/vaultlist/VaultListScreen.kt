@@ -164,8 +164,9 @@ fun VaultListScreen(
             ) {
                 item {
                     SkeletonBadge(
-                        text = "下面是真实的仓库内容（枚举 data/ 得来），导入已接通。" +
-                            "播放（stage-2）、删除、导出尚未接通。"
+                        text = "下面是真实的仓库内容（枚举 data/ 得来），导入与播放已接通。" +
+                            "删除、导出尚未接通 —— 在导出做出来之前，卸载 App 会连同这些密文一起删除，" +
+                            "手机上之外没有任何副本。"
                     )
                 }
                 items(loaded, key = { it.id }) { row ->
