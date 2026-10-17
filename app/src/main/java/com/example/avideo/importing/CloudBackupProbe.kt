@@ -28,25 +28,39 @@ object CloudBackupProbe {
     /** 字段名里出现这些词就当作「与云/备份/同步有关」的线索（大小写不敏感）。 */
     private val HINTS = listOf("cloud", "backup", "sync", "upload")
 
+    /**
+     * 表达式体、**没有任何 return**：Kotlin 不允许在表达式体函数里写 return，
+     * 而这里的分支多，写成「值表达式」比块体更不容易出错。
+     */
     fun probe(context: Context, uri: Uri): CloudState = try {
         val cursor = context.contentResolver.query(uri, null, null, null, null)
-            ?: return CloudState.UNKNOWN
-        cursor.use {
-            val columns = it.columnNames
-            val cloudColumns = columns.filter { name -> HINTS.any { hint -> name.contains(hint, ignoreCase = true) } }
-            if (cloudColumns.isEmpty()) return CloudState.NO_EVIDENCE
-            if (!it.moveToFirst()) return CloudState.NO_EVIDENCE
-            val flagged = cloudColumns.any { name ->
-                val index = it.getColumnIndex(name)
-                if (index < 0) return@any false
-                when (it.getType(index)) {
-                    Cursor.FIELD_TYPE_INTEGER -> it.getLong(index) != 0L
-                    Cursor.FIELD_TYPE_STRING -> !it.getString(index).isNullOrBlank()
-                    // 其它类型（blob/null）不当作证据
-                    else -> false
+        if (cursor == null) {
+            CloudState.UNKNOWN
+        } else {
+            cursor.use { c ->
+                val cloudColumns = c.columnNames
+                    .filter { name -> HINTS.any { hint -> name.contains(hint, ignoreCase = true) } }
+                when {
+                    cloudColumns.isEmpty() -> CloudState.NO_EVIDENCE
+                    !c.moveToFirst() -> CloudState.NO_EVIDENCE
+                    else -> {
+                        val flagged = cloudColumns.any { name ->
+                            val index = c.getColumnIndex(name)
+                            if (index < 0) {
+                                false
+                            } else {
+                                when (c.getType(index)) {
+                                    Cursor.FIELD_TYPE_INTEGER -> c.getLong(index) != 0L
+                                    Cursor.FIELD_TYPE_STRING -> !c.getString(index).isNullOrBlank()
+                                    // 其它类型（blob/null）不当作证据
+                                    else -> false
+                                }
+                            }
+                        }
+                        if (flagged) CloudState.POSSIBLY_BACKED_UP else CloudState.NO_EVIDENCE
+                    }
                 }
             }
-            if (flagged) CloudState.POSSIBLY_BACKED_UP else CloudState.NO_EVIDENCE
         }
     } catch (e: Exception) {
         // 权限不足、provider 不支持、URI 失效：都是「无法判断」，不影响导入
