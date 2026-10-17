@@ -39,6 +39,17 @@ object PlaybackBridge {
     private val _state = MutableStateFlow<State>(State.Stopped)
     val state: StateFlow<State> = _state.asStateFlow()
 
+    /**
+     * 桥最近的请求日志（只给 debug 覆盖层看）。
+     *
+     * 只记「方法 + Range 头 + 状态 + 字节数」：**不含路径、不含 token、不含任何明文字节**。
+     * 向后拖动卡死这类问题没有它就只能靠猜 —— 是 VLC 没发请求、请求被拒、
+     * 还是线程池被僵尸连接占满，三种情况的日志长得完全不一样。
+     */
+    private val _log = MutableStateFlow<List<String>>(emptyList())
+    val log: StateFlow<List<String>> = _log.asStateFlow()
+    private val logLock = Any()
+
     private val players = AtomicInteger(0)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -71,7 +82,16 @@ object PlaybackBridge {
     // ---- 以下只给服务用 ----
 
     internal fun publish(port: Int, token: String) {
+        synchronized(logLock) { _log.value = emptyList() }
         _state.value = State.Ready(port, token)
+        note("桥已启动：127.0.0.1:$port")
+    }
+
+    /** 记录一条桥日志。任何会记录的地方都 MUST 只写结构性信息。 */
+    internal fun note(line: String) {
+        synchronized(logLock) {
+            _log.value = (_log.value + line).takeLast(LOG_MAX)
+        }
     }
 
     internal fun markStopped() {
@@ -79,4 +99,6 @@ object PlaybackBridge {
     }
 
     internal fun activePlayers(): Int = players.get()
+
+    private const val LOG_MAX = 60
 }

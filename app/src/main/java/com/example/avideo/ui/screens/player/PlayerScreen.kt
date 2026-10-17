@@ -27,6 +27,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -76,6 +77,7 @@ fun PlayerScreen(
     var ended by remember { mutableStateOf(false) }
 
     val bridgeState by PlaybackBridge.state.collectAsState()
+    val bridgeLog by PlaybackBridge.log.collectAsState()
     val ready = bridgeState as? PlaybackBridge.State.Ready
 
     // libVLC 实例与播放器：remember 持有，离开时释放（否则原生资源泄漏）。
@@ -308,14 +310,23 @@ fun PlayerScreen(
                 )
                 if (BuildConfig.DEBUG) {
                     // 诊断用：判「时长差几秒」到底是 VLC 报得短，还是数据被截断。
-                    // 桥那一侧有完整文件时，plaintext_len 就是容器里记录的明文字节数。
                     Text(
                         "[诊断] VLC len=${durationMs}ms pos=${positionMs}ms " +
                             "seekable=${mediaPlayer.isSeekable} ended=$ended",
                         color = Color.White.copy(alpha = 0.45f),
                         style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(start = 16.dp, bottom = 4.dp),
+                        modifier = Modifier.padding(start = 16.dp, bottom = 2.dp),
                     )
+                    // 桥的请求日志：拖动卡死时，看最后几条就知道 VLC 到底发了什么、
+                    // 我们回了什么、有没有僵尸连接被看门狗收走。
+                    bridgeLog.takeLast(4).forEach { line ->
+                        Text(
+                            "  $line",
+                            color = Color.White.copy(alpha = 0.35f),
+                            fontSize = 9.sp,
+                            modifier = Modifier.padding(start = 16.dp),
+                        )
+                    }
                 }
 
                 Row(

@@ -19,6 +19,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -31,6 +32,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 /**
@@ -55,6 +57,17 @@ class LocalHttpService : Service() {
 
     private var token: String = ""
     private var tokenCreatedAt: Long = 0L
+
+    /**
+     * 活动连接 → 最后一次有进度的时刻。
+     *
+     * 为什么需要：VLC 在向后拖动时会**弃用**当前连接并另开一条，而被弃的那条可能
+     * 还卡在阻塞写里（对端不再读，TCP 发送缓冲塞满，`OutputStream.write` 一直不返回，
+     * 而且 Java 的 socket 超时只对读生效，对写无效）。弃用连接一多，线程池被占满，
+     * 后续请求全部排队 —— 表现就是「向后拖之后画面卡死」。
+     * 看门狗按这个表把长时间没有进度的连接强行关掉，阻塞写会立刻抛 IOException、线程归还。
+     */
+    private val activeSockets = ConcurrentHashMap<Socket, Long>()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -100,14 +113,35 @@ class LocalHttpService : Service() {
                 pool.execute { handleSafely(client) }
             }
         }
+        scope.launch { watchdog() }
+    }
+
+    /** 关掉「长时间没有写进度」的连接，把被阻塞写占住的线程还回池子。 */
+    private suspend fun watchdog() {
+        while (true) {
+            delay(WATCHDOG_INTERVAL_MS)
+            val now = System.currentTimeMillis()
+            activeSockets.entries.toList().forEach { (socket, lastActive) ->
+                if (now - lastActive > STALL_TIMEOUT_MS) {
+                    PlaybackBridge.note("watchdog: 关闭停滞连接（${now - lastActive}ms 无进展）")
+                    runCatching { socket.close() }
+                    activeSockets.remove(socket)
+                }
+            }
+        }
     }
 
     private fun handleSafely(client: Socket) {
-        client.use { socket ->
-            runCatching {
+        activeSockets[client] = System.currentTimeMillis()
+        try {
+            client.use { socket ->
                 socket.soTimeout = SOCKET_TIMEOUT_MS
                 handle(socket)
             }
+        } catch (e: IOException) {
+            PlaybackBridge.note("连接中断：${e.javaClass.simpleName}")
+        } finally {
+            activeSockets.remove(client)
         }
     }
 
@@ -127,7 +161,7 @@ class LocalHttpService : Service() {
             else line.substring(0, idx).trim().lowercase() to line.substring(idx + 1).trim()
         }.toMap()
 
-        val out = BufferedOutputStream(socket.getOutputStream())
+        val out = BufferedOutputStream(TrackedOutputStream(socket, socket.getOutputStream()))
 
         fun reply(
             code: Int,
@@ -143,6 +177,9 @@ class LocalHttpService : Service() {
             writeBody(out)
             out.flush()
         }
+
+        val rangeHeader = headers["range"]
+        PlaybackBridge.note("$method Range=${rangeHeader ?: "-"}")
 
         if (method != "GET" && method != "HEAD") {
             reply(405, "Method Not Allowed")
@@ -209,6 +246,8 @@ class LocalHttpService : Service() {
         val base = listOf(
             "Accept-Ranges" to "bytes",
             "Content-Type" to "application/octet-stream",
+            // 解密后的字节不该被任何缓存留存（回环也一样，这是个态度问题）
+            "Cache-Control" to "no-store",
         )
 
         when (val range = parseRange(headers["range"], length)) {
@@ -216,7 +255,9 @@ class LocalHttpService : Service() {
                 416,
                 "Range Not Satisfiable",
                 base + ("Content-Range" to "bytes */$length"),
-            ) { /* MUST NOT 返回任何明文字节 */ }
+            ) { /* MUST NOT 返回任何明文字节 */ }.also {
+                PlaybackBridge.note("  → 416 越界（明文长度 $length）")
+            }
 
             RangeSpec.Whole -> reply(
                 200,
@@ -239,8 +280,28 @@ class LocalHttpService : Service() {
                 ) { body ->
                     if (method != "HEAD") stream(reader, range.start, count, body)
                 }
+                PlaybackBridge.note("  → 206 ${range.start}-${range.end}/$length（$count B）")
             }
         }
+    }
+
+    /** 每次写出都刷新「最后一次有进度的时刻」，供看门狗判断连接是否停滞。 */
+    private inner class TrackedOutputStream(
+        private val socket: Socket,
+        private val delegate: OutputStream,
+    ) : OutputStream() {
+        override fun write(b: Int) {
+            activeSockets[socket] = System.currentTimeMillis()
+            delegate.write(b)
+        }
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            activeSockets[socket] = System.currentTimeMillis()
+            delegate.write(b, off, len)
+        }
+
+        override fun flush() = delegate.flush()
+        override fun close() = delegate.close()
     }
 
     /** 按区间解密并写出去。块边界由 reader 自己处理，这里只管切 ≤64 KiB 的片。 */
@@ -309,8 +370,15 @@ class LocalHttpService : Service() {
         const val CHANNEL_ID = "playback"
         const val NOTIFICATION_ID = 0x1A2C
 
-        /** 并发上限：够 libVLC 的「探测 + 预读 + 拖动」同时进行，又不会无限建线程。 */
-        const val MAX_CONCURRENCY = 6
+        /**
+         * 并发上限。VLC 会为「探测 + 预读 + 拖动后的重连」同时开好几条连接，
+         * 而向后拖动时被弃用的连接要等看门狗收尸；留足余量，别让池子被几条僵尸连接占满。
+         */
+        const val MAX_CONCURRENCY = 12
+
+        /** 看门狗：多久检查一次、多少毫秒没有写进度就认定这条连接已停滞。 */
+        const val WATCHDOG_INTERVAL_MS = 3_000L
+        const val STALL_TIMEOUT_MS = 20_000L
         const val BACKLOG = 16
         const val SOCKET_TIMEOUT_MS = 15_000
         const val MAX_HEADER_BYTES = 8 * 1024

@@ -15,11 +15,13 @@ import com.avideo.core.vault.VaultDirectory
 import com.avideo.core.vault.VaultEntry
 import com.avideo.core.vault.VaultMeta
 import com.avideo.core.vault.VaultMetaIO
+import com.example.avideo.importing.NotHiddenStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
+import java.io.OutputStream
 import java.security.MessageDigest
 
 /**
@@ -295,6 +297,56 @@ object VaultGateway {
      */
     fun pipeline(context: Context): ImportPipeline = ImportPipeline(directory(context))
 
+    /**
+     * 把一条密文**整份**解密写到 [sink]（导出）。
+     *
+     * 与播放走同一条读取路径（`EncryptedFileReader.read`），区别只是连续读完并写出。
+     * [onProgress] 在 IO 线程上回调，UI 侧自己切主线程。
+     *
+     * 注意：目标由用户在系统选择器里指定 —— 明文写在**用户选择的位置**，这是用户明确要求的动作，
+     * 与本项目「磁盘上不留明文」的约束不冲突（那条约束约束的是 App 自己偷偷落盘）。
+     */
+    suspend fun exportEntry(
+        context: Context,
+        uuid: String,
+        sink: OutputStream,
+        onProgress: (written: Long, total: Long) -> Unit = { _, _ -> },
+    ): Long = withContext(Dispatchers.IO) {
+        val masterKey = KeyRepository.getMasterKey()
+            ?: throw IllegalStateException("未解锁")
+        try {
+            val file = directory(context).cipherFile(uuid)
+            FileContainerChannel.openForRead(file).use { channel ->
+                EncryptedFileReader.open(channel, masterKey).use { reader ->
+                    val total = reader.plaintextLength
+                    var offset = 0L
+                    while (offset < total) {
+                        val n = minOf(EXPORT_CHUNK, total - offset).toInt()
+                        sink.write(reader.read(offset, n))
+                        offset += n
+                        onProgress(offset, total)
+                    }
+                    sink.flush()
+                    offset
+                }
+            }
+        } finally {
+            PasswordNormalizer.wipe(masterKey)
+        }
+    }
+
+    /**
+     * 删除一条密文条目，并清掉它的「尚未隐藏」记录。
+     *
+     * 删除就是删文件（不是覆写）：闪存的磨损均衡让「覆写后删除」没有意义，
+     * 声称能安全擦除反而是在骗人。
+     */
+    suspend fun deleteEntry(context: Context, uuid: String): Boolean = withContext(Dispatchers.IO) {
+        val deleted = directory(context).deleteEntry(uuid)
+        if (deleted) NotHiddenStore.clear(context, uuid)
+        deleted
+    }
+
     /** 主动锁定（退出、切后台超时）。 */
     fun lock() {
         KeyRepository.clear()
@@ -310,6 +362,9 @@ object VaultGateway {
      */
     suspend fun deriveForSelfTest(password: CharArray, salt: ByteArray, params: KdfParams): ByteArray =
         withContext(Dispatchers.Default) { deriver.derive(password, salt, params) }
+
+    /** 导出时每次解密写出的明文块大小。64 KiB 足够摊薄 syscall，又不会占太多内存。 */
+    private const val EXPORT_CHUNK = 64 * 1024L
 
     private fun derive(password: CharArray, meta: VaultMeta): ByteArray =
         deriver.derive(password, meta.kdfSalt, meta.kdfParams)

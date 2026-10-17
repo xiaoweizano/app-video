@@ -70,10 +70,12 @@ fun VaultListScreen(
     val context = LocalContext.current
     var showDeleteNotice by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(true) }
+    var reloadTick by remember { mutableStateOf(0) }
+    val scope = rememberCoroutineScope()
     // null = 未解锁（KeyRepository 里没有主密钥），空列表 = 仓库为空，两者必须分开呈现
     var rows by remember { mutableStateOf<List<VaultRow>?>(emptyList()) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(reloadTick) {
         isLoading = true
         // 「尚未隐藏」是持久化的状态（spec: source-cleanup），与仓库里的密文无关：
         // 密文写成功了，但源文件没删掉/没验证通过。
@@ -164,9 +166,9 @@ fun VaultListScreen(
             ) {
                 item {
                     SkeletonBadge(
-                        text = "下面是真实的仓库内容（枚举 data/ 得来），导入与播放已接通。" +
-                            "删除、导出尚未接通 —— 在导出做出来之前，卸载 App 会连同这些密文一起删除，" +
-                            "手机上之外没有任何副本。"
+                        text = "下面是真实的仓库内容（枚举 data/ 得来）。导入 / 播放 / 导出 / 删除都已接通。" +
+                            "注意：卸载 App 会连同这些密文一起删除，手机之外没有任何副本 —— " +
+                            "重要的视频请先导出。"
                     )
                 }
                 items(loaded, key = { it.id }) { row ->
@@ -180,16 +182,14 @@ fun VaultListScreen(
         }
     }
 
-    // 删除尚未实现。这里刻意不显示「确定删除」的按钮 —— 一个点了什么都不会发生的确认框，
-    // 比没有删除功能更糟。但对「尚未隐藏」的条目，这里要给的是**真正的**指引。
     showDeleteNotice?.let { id ->
         val notHidden = rows?.firstOrNull { it.id == id }?.status == EntryStatus.NOT_HIDDEN
         AlertDialog(
             onDismissRequest = { showDeleteNotice = null },
-            title = { Text(if (notHidden) "原文件还没确认删掉" else "删除还没接通") },
+            title = { Text(if (notHidden) "原文件还没确认删掉" else "删除这个条目？") },
             text = {
-                if (notHidden) {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (notHidden) {
                         Text(
                             "这个条目的密文已经写进保险箱了，但原文件没能删除或没能验证，" +
                                 "所以它可能仍然出现在相册或文件管理器里。"
@@ -199,15 +199,23 @@ fun VaultListScreen(
                                 "v1 不记录原文件的位置（记下来就等于把文件名写进明文）。"
                         )
                     }
-                } else {
                     Text(
-                        "删除会在导入/播放之后再做（要先确定「删除后不可恢复」在密文文件上意味着什么）。" +
-                            "现在点它不会有任何效果，你的文件没有被动过。"
+                        "删除条目会删掉保险箱里的这一份密文，不可恢复。" +
+                            "如果还没导出过，这个视频就永久消失了。"
                     )
                 }
             },
             confirmButton = {
-                TextButton(onClick = { showDeleteNotice = null }) { Text("知道了") }
+                TextButton(onClick = {
+                    showDeleteNotice = null
+                    scope.launch {
+                        VaultGateway.deleteEntry(context, id)
+                        reloadTick++          // 重新枚举 data/，列表自然刷新
+                    }
+                }) { Text("删除条目", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteNotice = null }) { Text("取消") }
             }
         )
     }
