@@ -7,9 +7,12 @@ import android.widget.FrameLayout
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Fullscreen
@@ -24,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
@@ -34,6 +38,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.example.avideo.BuildConfig
 import com.example.avideo.playback.PlaybackBridge
+import com.example.avideo.playback.PlaybackPositionStore
+import kotlin.math.abs
 import kotlinx.coroutines.delay
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
@@ -75,6 +81,11 @@ fun PlayerScreen(
     var attached by remember { mutableStateOf(false) }
     var mediaUrl by remember { mutableStateOf<String?>(null) }
     var ended by remember { mutableStateOf(false) }
+    var speed by remember { mutableStateOf(1.0f) }
+    /** 手势拖动时的预览位置；null = 没有正在拖动。 */
+    var seekPreviewMs by remember { mutableStateOf<Long?>(null) }
+    var resumeApplied by remember { mutableStateOf(false) }
+    var lastSavedAt by remember { mutableStateOf(0L) }
 
     val bridgeState by PlaybackBridge.state.collectAsState()
     val bridgeLog by PlaybackBridge.log.collectAsState()
@@ -100,15 +111,27 @@ fun PlayerScreen(
                     playState = PlayState.Playing
                     isPlaying = true
                     durationMs = mediaPlayer.length
+                    // 续播只做一次：只在「明显看过一部分、且没看到结尾」时才跳过去。
+                    if (!resumeApplied) {
+                        resumeApplied = true
+                        val saved = PlaybackPositionStore.get(context, fileId)
+                        if (saved > RESUME_MIN_MS && durationMs - saved > RESUME_MIN_MS) {
+                            mediaPlayer.time = saved
+                            positionMs = saved
+                        }
+                    }
                 }
                 MediaPlayer.Event.Paused -> {
                     playState = PlayState.Paused
                     isPlaying = false
+                    PlaybackPositionStore.put(context, fileId, mediaPlayer.time)
                 }
                 MediaPlayer.Event.EndReached -> {
                     playState = PlayState.Paused
                     isPlaying = false
                     ended = true
+                    // 看完了就不再续播，否则下次打开会「续」到片尾
+                    PlaybackPositionStore.clear(context, fileId)
                     // 结束时把位置对齐到时长：否则 VLC 有时停在 length 之前几百毫秒，
                     // 进度条看起来「差一截」。
                     durationMs = mediaPlayer.length.coerceAtLeast(durationMs)
@@ -121,6 +144,8 @@ fun PlayerScreen(
             }
         }
         onDispose {
+            // 离开播放页：把位置存下来，下次接着看
+            runCatching { PlaybackPositionStore.put(context, fileId, mediaPlayer.time) }
             mediaPlayer.setEventListener(null)
             runCatching { mediaPlayer.stop() }
             runCatching { mediaPlayer.detachViews() }
@@ -151,6 +176,9 @@ fun PlayerScreen(
         playState = PlayState.Buffering
     }
 
+    // 倍速：VLC 的 rate 支持 0.5x~2x，改变速率不重新解复用。
+    LaunchedEffect(speed) { mediaPlayer.rate = speed }
+
     // 进度轮询：VLC 没有「位置变化」事件，只能按固定间隔取。
     LaunchedEffect(playState) {
         while (true) {
@@ -158,6 +186,11 @@ fun PlayerScreen(
                 positionMs = mediaPlayer.time.coerceAtLeast(0L)
                 val len = mediaPlayer.length
                 if (len > 0) durationMs = len
+                val now = System.currentTimeMillis()
+                if (isPlaying && now - lastSavedAt > POSITION_SAVE_INTERVAL_MS) {
+                    lastSavedAt = now
+                    PlaybackPositionStore.put(context, fileId, positionMs)
+                }
             }
             delay(500L)
         }
@@ -221,15 +254,64 @@ fun PlayerScreen(
             modifier = Modifier.fillMaxSize(),
         )
 
-        // 全屏时点任意处退出。这一层刻意**放在控件之前**（因此位于控件下方）：
-        // 之前把它做成外层 Box 上的 clickable，结果它在进度条的祖先链上，
-        // 怀疑是它吃了进度条的拖拽 —— 无论如何，控件不该待在一个 clickable 里。
-        if (isFullscreen) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clickable { isFullscreen = false },
-            )
+        // 手势层：横划 = 快进/后退，轻点 = 退出全屏（只在全屏时）。
+        //
+        // 为什么用 awaitEachGesture 手写而不用两个 detect* 修饰符：同一位置只能有一个
+        // 节点被命中，两个兄弟层会互相抢事件；而同一个节点上叠两个 pointerInput，
+        // 谁先拿到 down 取决于修饰符顺序 —— 这里必须自己分辨「点了」还是「拖了」。
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        var totalDx = 0f
+                        var dragging = false
+                        var basePosition = 0L
+                        var preview = 0L
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) break
+                            totalDx += change.positionChange().x
+                            if (!dragging && abs(totalDx) > viewConfiguration.touchSlop) {
+                                dragging = true
+                                basePosition = mediaPlayer.time.coerceAtLeast(0L)
+                            }
+                            if (dragging) {
+                                change.consume()
+                                // 划过整屏 ≈ min(120s, 时长/4)，下限 10s：
+                                // 短视频不至于「一划就到底」，长视频也不至于划不动。
+                                val span = maxOf(10_000L, minOf(120_000L, durationMs / 4))
+                                preview = (basePosition + (totalDx / size.width * span.toFloat()).toLong())
+                                    .coerceIn(0L, durationMs.coerceAtLeast(0L))
+                                seekPreviewMs = preview
+                            }
+                        }
+                        if (dragging) {
+                            if (durationMs > 0) mediaPlayer.time = preview
+                            seekPreviewMs = null
+                        } else if (isFullscreen) {
+                            isFullscreen = false
+                        }
+                    }
+                },
+        )
+
+        seekPreviewMs?.let { target ->
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Surface(
+                    color = Color.Black.copy(alpha = 0.6f),
+                    shape = RoundedCornerShape(8.dp),
+                ) {
+                    Text(
+                        "${formatTime(target)}  /  ${formatTime(durationMs)}",
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    )
+                }
+            }
         }
 
         when (playState) {
@@ -363,6 +445,16 @@ fun PlayerScreen(
                             contentDescription = if (isPlaying) "暂停" else "播放",
                         )
                     }
+                    TextButton(onClick = { speed = nextSpeed(speed) }) {
+                        Text(
+                            formatSpeed(speed),
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier
+                                .background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 8.dp, vertical = 2.dp),
+                        )
+                    }
                     IconButton(
                         onClick = { isFullscreen = true },
                         // 半透明圆底：白图标压在画面上时，遇到亮背景就看不见了
@@ -463,6 +555,23 @@ private fun Overlay(content: @Composable ColumnScope.() -> Unit) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, content = content)
     }
 }
+
+/** 倍速档位。**不走 VLC 默认**：先给出常用档，循环切换。 */
+private val SPEEDS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+
+private fun nextSpeed(current: Float): Float {
+    val index = SPEEDS.indexOfFirst { abs(it - current) < 0.01f }
+    return SPEEDS[(index + 1).mod(SPEEDS.size)]
+}
+
+private fun formatSpeed(speed: Float): String =
+    if (abs(speed - speed.toInt()) < 0.01f) "${speed.toInt()}.0×" else "${speed}×"
+
+/** 续播的门槛：往前看超过这么多才值得续；离结尾小于这么多也不续（那是看完了）。 */
+private const val RESUME_MIN_MS = 5_000L
+
+/** 播放中每隔这么久把位置写一次盘。 */
+private const val POSITION_SAVE_INTERVAL_MS = 5_000L
 
 private fun formatTime(ms: Long): String {
     val totalSeconds = (ms / 1000).coerceAtLeast(0)

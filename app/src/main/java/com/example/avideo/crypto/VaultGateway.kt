@@ -343,7 +343,11 @@ object VaultGateway {
      */
     suspend fun deleteEntry(context: Context, uuid: String): Boolean = withContext(Dispatchers.IO) {
         val deleted = directory(context).deleteEntry(uuid)
-        if (deleted) NotHiddenStore.clear(context, uuid)
+        if (deleted) {
+            NotHiddenStore.clear(context, uuid)
+            // 条目没了，续播位置也必须清掉，否则同一个 uuid 再出现时会跳到荒谬的位置
+            com.example.avideo.playback.PlaybackPositionStore.clear(context, uuid)
+        }
         deleted
     }
 
