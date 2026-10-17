@@ -97,8 +97,19 @@ class VaultDirectory(
             ?.sortedBy { it.name }
             ?: emptyList()
 
-    fun newWriter(uuid: String, masterKey: ByteArray): EncryptedFileWriter =
-        EncryptedFileWriter(FileContainerChannel.openForWrite(cipherFile(uuid)), masterKey)
+    /**
+     * 新条目的写入器。
+     *
+     * [metadataLen] / [random] 可以注入，只为一件事：让导入管线在 JVM 测试里可用确定性的随机源。
+     * 生产路径不要传它们。
+     */
+    fun newWriter(
+        uuid: String,
+        masterKey: ByteArray,
+        metadataLen: Int = ContainerConstants.METADATA_LEN,
+        random: RandomSource = RandomSource.secure(),
+    ): EncryptedFileWriter =
+        EncryptedFileWriter(FileContainerChannel.openForWrite(cipherFile(uuid)), masterKey, metadataLen, random)
 
     /**
      * 已提交的条目。未提交的（导入被杀留下的）直接排除；单个损坏的条目降级为
@@ -147,6 +158,58 @@ class VaultDirectory(
                 channel != null -> channel.close()
             }
         }
+    }
+
+    /**
+     * 去重预检用的轻量索引：`(uuid, 显示名, 明文长度, 内容 SHA-256)`。
+     *
+     * 只读固定头与 metadata 区，**MUST NOT** 解密任何数据块
+     * （spec: import-flow「导入前取库内哈希集合」+「不读数据块」）。
+     * `plaintext_len` 来自固定头，是免费的 —— 导入时先拿它做长度闸门，
+     * 只有长度撞上才有必要额外读一遍源文件。
+     *
+     * 未提交的文件与读不出来的条目一律跳过：单个坏条目 MUST NOT 让整个索引失败
+     * （spec 同条：「单个条目损坏不影响集合」）。跳过的代价是「可能漏判一条重复」，
+     * 那比「因为一个坏文件就导不进来」轻得多。
+     */
+    fun indexEntries(masterKey: ByteArray): List<VaultIndexEntry> = cipherFiles().mapNotNull { file ->
+        val uuid = file.name.removeSuffix(SUFFIX)
+        var reader: EncryptedFileReader? = null
+        var channel: ContainerChannel? = null
+        try {
+            channel = channelFactory(file)
+            reader = EncryptedFileReader.open(channel, masterKey)
+            VaultIndexEntry(
+                uuid = uuid,
+                displayName = reader.metadata.displayName,
+                plaintextLength = reader.plaintextLength,
+                sha256 = reader.metadata.sha256,
+            )
+        } catch (e: UncommittedFileError) {
+            null
+        } catch (e: VaultError) {
+            null
+        } catch (e: IOException) {
+            null
+        } finally {
+            when {
+                reader != null -> reader.close()
+                channel != null -> channel.close()
+            }
+        }
+    }
+
+    /**
+     * 删除一条密文文件（「替换」时删旧条目、stage-1 的删除入口）。
+     *
+     * @return 文件确实不存在了 ⇒ true。uuid 形状不合法（含路径穿越）也返回 false ——
+     *   那是编程错误，但这里不该抛：调用点在删文件的循环里，抛出去会让整批导入失败。
+     */
+    fun deleteEntry(uuid: String): Boolean = try {
+        val file = cipherFile(uuid)
+        !file.exists() || file.delete()
+    } catch (e: IllegalArgumentException) {
+        false
     }
 
     /** 不需要密码：靠全零的 metadata_tag 判定（计划 D-1）。孤儿清理的入口。 */
@@ -230,6 +293,34 @@ class VaultDirectory(
         private val UUID_PATTERN =
             Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
     }
+}
+
+/**
+ * 去重预检索引的一条。[sha256] 来自**加密 metadata 区**，不是文件名。
+ */
+data class VaultIndexEntry(
+    val uuid: String,
+    val displayName: String,
+    /** 来自固定头。用它做长度闸门：长度不同必然不是重复。 */
+    val plaintextLength: Long,
+    val sha256: ByteArray,
+) {
+    // data class 里放了 ByteArray，equals/hashCode 必须自己给，否则是引用比较。
+    override fun equals(other: Any?): Boolean =
+        other is VaultIndexEntry && uuid == other.uuid && displayName == other.displayName &&
+            plaintextLength == other.plaintextLength && sha256.contentEquals(other.sha256)
+
+    override fun hashCode(): Int {
+        var result = uuid.hashCode()
+        result = 31 * result + displayName.hashCode()
+        result = 31 * result + plaintextLength.hashCode()
+        result = 31 * result + sha256.contentHashCode()
+        return result
+    }
+
+    override fun toString(): String =
+        "VaultIndexEntry(uuid=$uuid, displayNameLength=${displayName.length}, " +
+            "plaintextLength=$plaintextLength, sha256=<${sha256.size}B>)"
 }
 
 /**

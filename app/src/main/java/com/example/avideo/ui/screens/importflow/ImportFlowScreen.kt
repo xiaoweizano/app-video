@@ -1,43 +1,57 @@
 package com.example.avideo.ui.screens.importflow
 
-import androidx.compose.foundation.background
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.example.avideo.ui.theme.success
-import com.example.avideo.ui.theme.warning
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import com.example.avideo.ui.SkeletonBadge
+import com.avideo.core.importing.DuplicateCandidate
+import com.avideo.core.importing.DuplicateChoice
+import com.example.avideo.importing.ImportController
+import com.example.avideo.ui.theme.*
 
 /**
- * 导入流程 — 两阶段：确认 → 云端警告（可选）→ 进度 → 结果
+ * 导入流程 —— 选文件 → （必要时）重复裁决 → 加密写入 → 逐条结果。
  *
- * DESIGN.md §6:
- * - 重复导入：对话框三选一（跳过/替换/保留两份）
- * - 云端警告：默认弹出，一次 dismiss 不永久记住
- * - 进度条反映真实字节数，不转圈
- * - 结果：已藏好（绿）/ 尚未隐藏（橙+明确文案）/ 失败（红）
+ * 这一屏的每一条行为都来自 spec，不是随手加的：
+ *  - 用 `ACTION_OPEN_DOCUMENT`（`OpenMultipleDocuments` 就是它）：8.0 起相册/文件管理器
+ *    的 `ACTION_PICK` / `ACTION_GET_CONTENT` 可能返回**转码后的副本**，既掉画质，
+ *    又让 AVI/RMVB 这类格式根本选不出来（spec: media-source）。
+ *  - 空选择什么都不做、也不报错（spec: import-flow「空选择」）。
+ *  - 云端备份警告**默认出现**，且措辞是「无法判断」而不是「未备份」
+ *    （spec: cloud-backup-warning 三态里我们只敢说最保守的那一态）。
+ *  - 重复项三选一，文案里写明「跳过会保留哪一条」（spec: duplicate-detection）。
+ *  - 结果逐条显示：已藏好 / 尚未隐藏（原文件可能仍可被找到）/ 跳过 / 失败。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ImportFlowScreen(
     onBack: () -> Unit,
     onComplete: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
 ) {
-    var stage by remember { mutableStateOf<ImportStage>(ImportStage.Confirm) }
-    var progress by remember { mutableStateOf(0f) }
-    var showCloudWarning by remember { mutableStateOf(false) }
-    var importResult by remember { mutableStateOf<ImportResult?>(null) }
-    val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val state by ImportController.state.collectAsState()
+
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) ImportController.prepare(context, uris)
+    }
+
+    // 离开本页时把状态收回 Idle，否则下次进来会先看到上一次的结果。
+    DisposableEffect(Unit) {
+        onDispose { ImportController.finish() }
+    }
 
     Scaffold(
         modifier = modifier,
@@ -56,224 +70,237 @@ fun ImportFlowScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .verticalScroll(rememberScrollState())
                 .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            SkeletonBadge(text = "骨架 · 导入是模拟的（假进度；真实加密写入与源文件删除未接）")
-            when (stage) {
-                ImportStage.Confirm -> {
-                    ConfirmCard(
-                        onSkip = { stage = ImportStage.Done; importResult = ImportResult.Success },
-                        onKeepBoth = { stage = ImportStage.Done; importResult = ImportResult.Success },
-                        onReplace = { showCloudWarning = true }
+            CloudBackupWarning()
+
+            when (val current = state) {
+                ImportController.State.Idle -> {
+                    Text(
+                        "选中的文件会被加密写进保险箱，然后尝试删除原文件。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Button(
+                        onClick = { picker.launch(arrayOf("video/*")) },
+                        modifier = Modifier.fillMaxWidth().height(56.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    ) { Text("选择视频") }
+                }
+
+                is ImportController.State.Rejected -> {
+                    Text(
+                        current.message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Button(
+                        onClick = { picker.launch(arrayOf("video/*")) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("重新选择") }
+                }
+
+                is ImportController.State.Preparing -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("正在预检 ${current.total} 个文件（判重）…")
+                    }
+                    Text(
+                        "只有大小与库内某条相同的文件才需要算一遍哈希，其余直接开始写。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
 
-                ImportStage.Processing -> {
-                    ProcessingCard(progress = progress)
-                    LaunchedEffect(progress) {
-                        if (progress < 1.0f) {
-                            delay(200L)
-                            progress = (progress + 0.05f).coerceAtMost(1.0f)
-                            if (progress >= 1.0f) {
-                                // 模拟：90% 概率成功，10% 概率"尚未隐藏"
-                                importResult = if (Math.random() > 0.1) ImportResult.Success
-                                else ImportResult.NotHidden
-                                stage = ImportStage.Done
-                            }
-                        }
-                    }
+                is ImportController.State.NeedsDedup -> {
+                    Text(
+                        "还有一个重复项要确认：${current.candidate.source.displayName}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
 
-                ImportStage.Done -> {
-                    importResult?.let { result ->
-                        when (result) {
-                            ImportResult.Success -> SuccessState()
-                            ImportResult.NotHidden -> NotHiddenState(
-                                onRetry = {
-                                    stage = ImportStage.Processing
-                                    progress = 0f
-                                },
-                                onGuide = {}
-                            )
-                            ImportResult.Failed -> FailedState(
-                                onRetry = {
-                                    stage = ImportStage.Processing
-                                    progress = 0f
-                                }
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.weight(1f))
-                    Button(
-                        onClick = onComplete,
-                        modifier = Modifier.fillMaxWidth().height(56.dp)
-                    ) {
-                        Text("完成")
-                    }
+                is ImportController.State.Running -> {
+                    Text("正在加密写入…", style = MaterialTheme.typography.titleSmall)
+                    current.rows.forEach { RowItem(it) }
+                }
+
+                is ImportController.State.Finished -> {
+                    Text("导入结果", style = MaterialTheme.typography.titleSmall)
+                    current.rows.forEach { RowItem(it) }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(onClick = onComplete, modifier = Modifier.fillMaxWidth()) { Text("完成") }
                 }
             }
         }
     }
 
-    if (showCloudWarning) {
-        CloudWarningDialog(
-            onDismiss = { showCloudWarning = false },
-            onConfirm = {
-                showCloudWarning = false
-                stage = ImportStage.Processing
-                progress = 0f
-            }
-        )
-    }
-}
-
-// ─── Sub-composables ────────────────────────────────────────────────
-
-@Composable
-private fun ConfirmCard(
-    onSkip: () -> Unit,
-    onKeepBoth: () -> Unit,
-    onReplace: () -> Unit
-) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = "检测到重复文件",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Medium
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "文件中存在相同的 SHA-256 哈希值，请选择处理方式：",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onSkip, modifier = Modifier.weight(1f)) {
-                    Text("跳过")
-                }
-                FilledTonalButton(onClick = onKeepBoth, modifier = Modifier.weight(1f)) {
-                    Text("保留两份")
-                }
-                Button(
-                    onClick = onReplace,
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("替换")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ProcessingCard(progress: Float) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(
-            text = "正在加密写入...",
-            style = MaterialTheme.typography.titleMedium
-        )
-        LinearProgressIndicator(
-            progress = progress,
-            modifier = Modifier.fillMaxWidth().height(8.dp),
-            color = MaterialTheme.colorScheme.primary,
-            trackColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-        Text(
-            text = "${(progress * 100).toInt()}%",
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+    (state as? ImportController.State.NeedsDedup)?.let { s ->
+        DedupDialog(
+            candidate = s.candidate,
+            remaining = s.remaining,
+            onChoose = { ImportController.chooseDuplicate(it) },
         )
     }
 }
 
 @Composable
-private fun SuccessState() {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.success.copy(alpha = 0.1f))
-    ) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("已藏好", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.success)
-            Text(
-                "视频已加密保存，源文件已删除。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-        }
-    }
-}
-
-@Composable
-private fun NotHiddenState(onRetry: () -> Unit, onGuide: () -> Unit) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.warning.copy(alpha = 0.1f))
-    ) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("尚未隐藏", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.warning)
-            Text(
-                "原文件仍可能被相册或文件管理器找到。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onRetry, modifier = Modifier.weight(1f)) { Text("重试删除") }
-                OutlinedButton(onClick = onGuide, modifier = Modifier.weight(1f)) { Text("手动删除指引") }
-            }
-        }
-    }
-}
-
-@Composable
-private fun FailedState(onRetry: () -> Unit) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.error.copy(alpha = 0.1f))
-    ) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("写入失败", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.error)
-            Text(
-                "加密写入过程中发生错误，视频未保存。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("重试") }
-        }
-    }
-}
-
-@Composable
-private fun CloudWarningDialog(
-    onDismiss: () -> Unit,
-    onConfirm: () -> Unit
+private fun DedupDialog(
+    candidate: DuplicateCandidate,
+    remaining: Int,
+    onChoose: (DuplicateChoice) -> Unit,
 ) {
     AlertDialog(
-        onDismissRequest = onDismiss,
-        icon = {
-            Icon(
-                Icons.Default.CloudOff,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.warning
-            )
-        },
-        title = { Text("云端备份警告") },
+        // 必须选一个：点外面关掉会让整批导入卡在这个状态
+        onDismissRequest = { },
+        title = { Text("这个视频已经导入过") },
         text = {
-            Text(
-                "检测到该文件可能已被云端备份（如 Google Photos / 小米云 / 华为云）。" +
-                "删除本地文件不会撤销云端备份，建议检查云端设置。"
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "「${candidate.source.displayName}」与库里的「${candidate.match.existingName}」" +
+                        "内容完全相同（按内容哈希判断，不是按文件名）。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    "跳过 = 保留库里的「${candidate.match.existingName}」，不导入这一份。\n" +
+                        "替换 = 用这次的显示名替换掉它。\n" +
+                        "保留两份 = 两条都留着（内容相同，占两份空间）。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (remaining > 0) {
+                    Text(
+                        "后面还有 $remaining 个重复项要确认。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.warning,
+                    )
+                }
+            }
         },
         confirmButton = {
-            TextButton(onClick = onConfirm) { Text("继续导入") }
+            TextButton(onClick = { onChoose(DuplicateChoice.KEEP_BOTH) }) { Text("保留两份") }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
-        }
+            Row {
+                TextButton(onClick = { onChoose(DuplicateChoice.SKIP) }) { Text("跳过") }
+                TextButton(onClick = { onChoose(DuplicateChoice.REPLACE) }) { Text("替换") }
+            }
+        },
     )
 }
 
-private enum class ImportStage { Confirm, Processing, Done }
-private enum class ImportResult { Success, NotHidden, Failed }
+@Composable
+private fun RowItem(row: ImportController.Row) {
+    val colorScheme = MaterialTheme.colorScheme
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = row.label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        when (val st = row.state) {
+            ImportController.RowState.Pending -> Text(
+                "等待中",
+                style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.onSurfaceVariant,
+            )
+
+            is ImportController.RowState.Writing -> {
+                val total = st.statedSize
+                if (total != null && total > 0) {
+                    LinearProgressIndicator(
+                        progress = (st.bytesRead.toFloat() / total).coerceIn(0f, 1f),
+                        modifier = Modifier.fillMaxWidth().height(2.dp),
+                    )
+                    Text(
+                        "${formatBytes(st.bytesRead)} / ${formatBytes(total)}（已写入，按实读字节计）",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    // 声明大小未知：给不确定态，不编一个百分比
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(2.dp))
+                    Text(
+                        "已写入 ${formatBytes(st.bytesRead)}（源未声明大小）",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            ImportController.RowState.Hidden -> Text(
+                "已藏好 · 原文件已删除并验证",
+                style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.success,
+            )
+
+            is ImportController.RowState.NotHidden -> {
+                Text(
+                    "尚未隐藏 · 原文件可能仍能在相册或文件管理里找到",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colorScheme.warning,
+                )
+                st.detail?.let {
+                    Text(it, style = MaterialTheme.typography.labelSmall, color = colorScheme.onSurfaceVariant)
+                }
+                Text(
+                    "请在相册 / 文件管理里手动删除原文件。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colorScheme.onSurfaceVariant,
+                )
+            }
+
+            is ImportController.RowState.Skipped -> Text(
+                st.reason,
+                style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.onSurfaceVariant,
+            )
+
+            is ImportController.RowState.Failed -> Text(
+                "失败：${st.reason}",
+                style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.error,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CloudBackupWarning() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.warning.copy(alpha = 0.12f)
+        ),
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                "云端备份提醒（无法判断）",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.warning,
+            )
+            Text(
+                "如果这个视频曾经上传到云相册（Google 相册 / 小米云 / 华为云…），" +
+                    "删除本地文件不会撤销云端那一份。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "Android 没有可靠接口能查「某个文件是否已上传」，所以这里只能提醒，不能替你确认。" +
+                    "导入后请自行到对应云相册里看一眼。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+private fun formatBytes(bytes: Long): String =
+    if (bytes >= 1024L * 1024L) "%.1f MB".format(bytes / 1024.0 / 1024.0)
+    else if (bytes >= 1024L) "%.0f KB".format(bytes / 1024.0)
+    else "$bytes B"

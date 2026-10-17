@@ -7,6 +7,7 @@ import com.avideo.core.container.FileContainerChannel
 import com.avideo.core.crypto.KdfParams
 import com.avideo.core.crypto.MasterKeyDeriver
 import com.avideo.core.crypto.PasswordNormalizer
+import com.avideo.core.importing.ImportPipeline
 import com.avideo.core.errors.VaultCorruptedError
 import com.avideo.core.errors.VaultError
 import com.avideo.core.vault.MasterKeyProbe
@@ -287,6 +288,12 @@ object VaultGateway {
                  else "    ✗ 删除失败（目录或文件被占用？）\n")
         sb.toString()
     }
+
+    /**
+     * 导入管线（stage-1）。加密写盘只有这一份实现（spec: import-flow MUST NOT 有第二份）。
+     * 每次新建即可：它不持有任何状态。
+     */
+    fun pipeline(context: Context): ImportPipeline = ImportPipeline(directory(context))
 
     /** 主动锁定（退出、切后台超时）。 */
     fun lock() {

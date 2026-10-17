@@ -23,6 +23,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.avideo.BuildConfig
 import com.example.avideo.crypto.VaultGateway
+import com.example.avideo.importing.NotHiddenStore
 import com.example.avideo.ui.SkeletonBadge
 import com.example.avideo.ui.theme.*
 
@@ -74,13 +75,20 @@ fun VaultListScreen(
 
     LaunchedEffect(Unit) {
         isLoading = true
+        // 「尚未隐藏」是持久化的状态（spec: source-cleanup），与仓库里的密文无关：
+        // 密文写成功了，但源文件没删掉/没验证通过。
+        val notHidden = NotHiddenStore.uuids(context)
         rows = VaultGateway.entries(context)?.map { item ->
             VaultRow(
                 id = item.uuid,
                 // 条目损坏时显示名解不出来。uuid 是结构性信息（不含原文件名），可以显示。
                 displayName = item.displayName ?: "无法读取的条目 ${item.uuid.take(8)}",
                 durationMs = item.durationMs,
-                status = if (item.corrupted) EntryStatus.FAILED else EntryStatus.HIDDEN,
+                status = when {
+                    item.corrupted -> EntryStatus.FAILED
+                    item.uuid in notHidden -> EntryStatus.NOT_HIDDEN
+                    else -> EntryStatus.HIDDEN
+                },
             )
         }
         isLoading = false
@@ -156,8 +164,8 @@ fun VaultListScreen(
             ) {
                 item {
                     SkeletonBadge(
-                        text = "下面是真实的仓库内容（枚举 data/ 得来）。" +
-                            "导入、播放、删除尚未接通：stage-1 / stage-2。"
+                        text = "下面是真实的仓库内容（枚举 data/ 得来），导入已接通。" +
+                            "播放（stage-2）、删除、导出尚未接通。"
                     )
                 }
                 items(loaded, key = { it.id }) { row ->
@@ -171,17 +179,29 @@ fun VaultListScreen(
         }
     }
 
-    // 删除尚未实现。这里刻意**不**显示一个「确定删除」的按钮 ——
-    // 一个点了什么都不会发生的确认框，是比没有删除功能更糟的体验。
-    showDeleteNotice?.let {
+    // 删除尚未实现。这里刻意不显示「确定删除」的按钮 —— 一个点了什么都不会发生的确认框，
+    // 比没有删除功能更糟。但对「尚未隐藏」的条目，这里要给的是**真正的**指引。
+    showDeleteNotice?.let { id ->
+        val notHidden = rows?.firstOrNull { it.id == id }?.status == EntryStatus.NOT_HIDDEN
         AlertDialog(
             onDismissRequest = { showDeleteNotice = null },
-            title = { Text("删除还没接通") },
+            title = { Text(if (notHidden) "原文件还没确认删掉" else "删除还没接通") },
             text = {
-                Text(
-                    "删除会在 stage-1 和导入一起做（要先确定「删除后不可恢复」在密文文件上意味着什么）。" +
-                        "现在点它不会有任何效果，你的文件没有被动过。"
-                )
+                if (notHidden) {
+                    Text(
+                        "这个条目的密文已经写进保险箱了，但原文件没能删除或没能验证，" +
+                            "所以它可能仍然出现在相册或文件管理器里。
+
+" +
+                            "请在相册 / 文件管理里手动删除它。删掉之后这里的状态不会自动更新 —— " +
+                            "v1 不记录原文件的位置（记下来就等于把文件名写进明文）。"
+                    )
+                } else {
+                    Text(
+                        "删除会在导入/播放之后再做（要先确定「删除后不可恢复」在密文文件上意味着什么）。" +
+                            "现在点它不会有任何效果，你的文件没有被动过。"
+                    )
+                }
             },
             confirmButton = {
                 TextButton(onClick = { showDeleteNotice = null }) { Text("知道了") }
