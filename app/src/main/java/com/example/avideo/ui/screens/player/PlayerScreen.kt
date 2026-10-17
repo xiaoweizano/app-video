@@ -1,5 +1,6 @@
 package com.example.avideo.ui.screens.player
 
+import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -64,6 +65,8 @@ fun PlayerScreen(
     var seekFraction by remember { mutableStateOf<Float?>(null) }   // 拖动时暂时接管进度条
     var retryTick by remember { mutableStateOf(0) }
     var attached by remember { mutableStateOf(false) }
+    var mediaUrl by remember { mutableStateOf<String?>(null) }
+    var ended by remember { mutableStateOf(false) }
 
     val bridgeState by PlaybackBridge.state.collectAsState()
     val ready = bridgeState as? PlaybackBridge.State.Ready
@@ -96,6 +99,11 @@ fun PlayerScreen(
                 MediaPlayer.Event.EndReached -> {
                     playState = PlayState.Paused
                     isPlaying = false
+                    ended = true
+                    // 结束时把位置对齐到时长：否则 VLC 有时停在 length 之前几百毫秒，
+                    // 进度条看起来「差一截」。
+                    durationMs = mediaPlayer.length.coerceAtLeast(durationMs)
+                    positionMs = durationMs
                 }
                 MediaPlayer.Event.EncounteredError -> {
                     errorText = "解码或数据源出错"
@@ -128,6 +136,8 @@ fun PlayerScreen(
         }
         mediaPlayer.media = media
         media.release()
+        mediaUrl = url
+        ended = false
         mediaPlayer.play()
         playState = PlayState.Buffering
     }
@@ -142,6 +152,20 @@ fun PlayerScreen(
             }
             delay(500L)
         }
+    }
+
+    // 全屏 = 横屏。不能依赖系统的自动旋转：很多人的自动旋转是关着的，
+    // 那样「全屏」就只剩隐藏控制栏，等于没做。退出时恢复 unspecified。
+    val activity = context as? android.app.Activity
+    LaunchedEffect(isFullscreen) {
+        activity?.requestedOrientation = if (isFullscreen) {
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose { activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
     }
 
     if (BuildConfig.DEBUG == false) {
@@ -250,6 +274,17 @@ fun PlayerScreen(
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.padding(start = 16.dp, bottom = 8.dp),
                 )
+                if (BuildConfig.DEBUG) {
+                    // 诊断用：判「时长差几秒」到底是 VLC 报得短，还是数据被截断。
+                    // 桥那一侧有完整文件时，plaintext_len 就是容器里记录的明文字节数。
+                    Text(
+                        "[诊断] VLC len=${durationMs}ms pos=${positionMs}ms " +
+                            "seekable=${mediaPlayer.isSeekable} ended=$ended",
+                        color = Color.White.copy(alpha = 0.45f),
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(start = 16.dp, bottom = 4.dp),
+                    )
+                }
 
                 Row(
                     modifier = Modifier
@@ -263,7 +298,18 @@ fun PlayerScreen(
                     }
                     FloatingActionButton(
                         onClick = {
-                            if (isPlaying) mediaPlayer.pause() else mediaPlayer.play()
+                            when {
+                                isPlaying -> mediaPlayer.pause()
+                                // 从 Ended 状态直接 play() 不会重头放：VLC 的输入已经结束，
+                                // 必须换一个新 media（同一个 URL）再播放。
+                                ended -> {
+                                    ended = false
+                                    playState = PlayState.Buffering
+                                    positionMs = 0L
+                                    retryTick++
+                                }
+                                else -> mediaPlayer.play()
+                            }
                         },
                         containerColor = Color.White,
                         contentColor = Color.Black,
