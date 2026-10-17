@@ -4,10 +4,12 @@ import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Fullscreen
@@ -19,11 +21,16 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.example.avideo.BuildConfig
 import com.example.avideo.playback.PlaybackBridge
 import kotlinx.coroutines.delay
@@ -157,15 +164,33 @@ fun PlayerScreen(
     // 全屏 = 横屏。不能依赖系统的自动旋转：很多人的自动旋转是关着的，
     // 那样「全屏」就只剩隐藏控制栏，等于没做。退出时恢复 unspecified。
     val activity = context as? android.app.Activity
+    val window = activity?.window
     LaunchedEffect(isFullscreen) {
         activity?.requestedOrientation = if (isFullscreen) {
             ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         } else {
             ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
+        // 「全屏」必须是真全屏：只藏控制栏而状态栏还在，观感上等于没全屏。
+        if (window != null) {
+            val controller = WindowCompat.getInsetsController(window, view)
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            if (isFullscreen) {
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+            } else {
+                controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
     }
     DisposableEffect(Unit) {
-        onDispose { activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
+        onDispose {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            if (window != null) {
+                WindowCompat.getInsetsController(window, view)
+                    .show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
     }
 
     if (BuildConfig.DEBUG == false) {
@@ -178,12 +203,7 @@ fun PlayerScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color.Black)
-            .clickable(
-                // 全屏时点一下切换控制栏（不做任何手势调节 —— spec 明确 v1 只有三项交互）
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-            ) { if (isFullscreen) isFullscreen = false },
+            .background(Color.Black),
     ) {
         AndroidView(
             factory = { ctx ->
@@ -198,6 +218,17 @@ fun PlayerScreen(
             },
             modifier = Modifier.fillMaxSize(),
         )
+
+        // 全屏时点任意处退出。这一层刻意**放在控件之前**（因此位于控件下方）：
+        // 之前把它做成外层 Box 上的 clickable，结果它在进度条的祖先链上，
+        // 怀疑是它吃了进度条的拖拽 —— 无论如何，控件不该待在一个 clickable 里。
+        if (isFullscreen) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable { isFullscreen = false },
+            )
+        }
 
         when (playState) {
             PlayState.Loading, PlayState.Buffering -> Overlay {
@@ -251,17 +282,18 @@ fun PlayerScreen(
                     .navigationBarsPadding()
                     .padding(bottom = 16.dp),
             ) {
-                Slider(
-                    value = seekFraction
+                // 自绘进度条，不用 Material3 Slider。
+                // 原因：真机实测「白色圆点完全不动」—— 触摸事件根本没到控件上，而同一列里
+                // 的按钮却正常。排查顺序是先把祖先链上的 clickable 挪走（见上），
+                // 再把这个唯一失效的控件换掉：它的触控只有这一个实现，出问题就整体重写，
+                // 比在一堆图层里猜谁吃了事件更快。
+                SeekBar(
+                    fraction = seekFraction
                         ?: if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f,
-                    onValueChange = { seekFraction = it },
-                    onValueChangeFinished = {
-                        val fraction = seekFraction
-                        seekFraction = null
-                        if (fraction != null && durationMs > 0) {
-                            // 只定位，不解码整份 —— 桥那边只解这一块
-                            mediaPlayer.time = (fraction * durationMs).toLong()
-                        }
+                    onScrub = { seekFraction = it },
+                    onSeek = { fraction ->
+                        // 只定位，不解码整份 —— 桥那边只解你拖到的这一块
+                        if (durationMs > 0) mediaPlayer.time = (fraction * durationMs).toLong()
                     },
                     modifier = Modifier
                         .fillMaxWidth()
@@ -320,8 +352,12 @@ fun PlayerScreen(
                             contentDescription = if (isPlaying) "暂停" else "播放",
                         )
                     }
-                    IconButton(onClick = { isFullscreen = true }) {
-                        Icon(Icons.Default.Fullscreen, contentDescription = "全屏", tint = colorScheme.onPrimary)
+                    IconButton(
+                        onClick = { isFullscreen = true },
+                        // 半透明圆底：白图标压在画面上时，遇到亮背景就看不见了
+                        modifier = Modifier.background(Color.Black.copy(alpha = 0.4f), CircleShape),
+                    ) {
+                        Icon(Icons.Default.Fullscreen, contentDescription = "全屏", tint = Color.White)
                     }
                 }
             }
@@ -329,11 +365,79 @@ fun PlayerScreen(
             // 全屏时只留一个退出按钮：点画面任意处也会退出（见外层 clickable）
             IconButton(
                 onClick = { isFullscreen = false },
-                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+                    .background(Color.Black.copy(alpha = 0.4f), CircleShape),
             ) {
                 Icon(Icons.Default.FullscreenExit, contentDescription = "退出全屏", tint = Color.White)
             }
         }
+    }
+}
+
+/**
+ * 自绘进度条：3 dp 的视觉线 + 40 dp 的触控高度。
+ *
+ * 不用 Material3 Slider 的原因写在调用处：真机上它完全收不到拖拽事件，
+ * 而同一列里的按钮正常。自己实现 pointerInput 之后，触摸链就是
+ * 「一个明确高度的 Canvas + detectHorizontalDragGestures」，没有别的图层能挡住它。
+ */
+@Composable
+private fun SeekBar(
+    fraction: Float,
+    onScrub: (Float?) -> Unit,
+    onSeek: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var dragging by remember { mutableStateOf(false) }
+    var dragFraction by remember { mutableStateOf(0f) }
+    val shown = (if (dragging) dragFraction else fraction).coerceIn(0f, 1f)
+
+    Canvas(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(40.dp)
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures(
+                    onDragStart = { offset ->
+                        dragging = true
+                        // 按下就跳到按下的位置：不必先滑过一段阈值
+                        dragFraction = (offset.x / size.width).coerceIn(0f, 1f)
+                        onScrub(dragFraction)
+                    },
+                    onHorizontalDrag = { change, _ ->
+                        dragFraction = (change.position.x / size.width).coerceIn(0f, 1f)
+                        onScrub(dragFraction)
+                        change.consume()
+                    },
+                    onDragEnd = {
+                        dragging = false
+                        onSeek(dragFraction)
+                        onScrub(null)
+                    },
+                    onDragCancel = {
+                        dragging = false
+                        onScrub(null)
+                    },
+                )
+            },
+    ) {
+        val centerY = size.height / 2f
+        val thumbX = (size.width * shown).coerceIn(0f, size.width)
+        drawLine(
+            color = Color.White.copy(alpha = 0.3f),
+            start = Offset(0f, centerY),
+            end = Offset(size.width, centerY),
+            strokeWidth = 3f,
+        )
+        drawLine(
+            color = Color.White,
+            start = Offset(0f, centerY),
+            end = Offset(thumbX, centerY),
+            strokeWidth = 3f,
+        )
+        drawCircle(color = Color.White, radius = 8.dp.toPx(), center = Offset(thumbX, centerY))
     }
 }
 
