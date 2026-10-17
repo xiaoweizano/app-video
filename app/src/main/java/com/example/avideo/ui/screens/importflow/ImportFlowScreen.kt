@@ -1,5 +1,7 @@
 package com.example.avideo.ui.screens.importflow
 
+import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
@@ -23,8 +25,8 @@ import com.example.avideo.ui.theme.*
  * 导入流程 —— 选文件 → （必要时）重复裁决 → 加密写入 → 逐条结果。
  *
  * 这一屏的每一条行为都来自 spec，不是随手加的：
- *  - 用 `ACTION_OPEN_DOCUMENT`（`OpenMultipleDocuments` 就是它）：8.0 起相册/文件管理器
- *    的 `ACTION_PICK` / `ACTION_GET_CONTENT` 可能返回**转码后的副本**，既掉画质，
+ *  - 用 `ACTION_OPEN_DOCUMENT`（显式构造 Intent，见 [ImportFlowScreen] 里的 picker）：
+ *    相册/文件管理器的 `ACTION_PICK` / `ACTION_GET_CONTENT` 可能返回转码后的副本，既掉画质，
  *    又让 AVI/RMVB 这类格式根本选不出来（spec: media-source）。
  *  - 空选择什么都不做、也不报错（spec: import-flow「空选择」）。
  *  - 云端备份警告**默认出现**，且措辞是「无法判断」而不是「未备份」
@@ -42,10 +44,38 @@ fun ImportFlowScreen(
     val context = LocalContext.current
     val state by ImportController.state.collectAsState()
 
+    // 显式构造 ACTION_OPEN_DOCUMENT，而不是用 ActivityResultContracts.OpenMultipleDocuments：
+    // 后者不带 FLAG_GRANT_WRITE_URI_PERMISSION，于是 cleanup 里的 deleteDocument 几乎必然
+    // 因缺少写权限失败 —— 每条导入都会落到「尚未隐藏」。写权限是「删掉原文件」的前提。
     val picker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris ->
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val data = result.data ?: return@rememberLauncherForActivityResult
+        val clip = data.clipData
+        val uris: List<Uri> = when {
+            clip != null -> (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }
+            data.data != null -> listOf(data.data!!)
+            else -> emptyList()
+        }
+        // 空选择 MUST NOT 产生任何写盘动作，也不报错（spec: import-flow「空选择」）
         if (uris.isNotEmpty()) ImportController.prepare(context, uris)
+    }
+
+    fun launchPicker() {
+        picker.launch(
+            Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "video/*"
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("video/*"))
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                )
+            }
+        )
     }
 
     // 离开本页时把状态收回 Idle，否则下次进来会先看到上一次的结果。
@@ -84,7 +114,7 @@ fun ImportFlowScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Button(
-                        onClick = { picker.launch(arrayOf("video/*")) },
+                        onClick = { launchPicker() },
                         modifier = Modifier.fillMaxWidth().height(56.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                     ) { Text("选择视频") }
@@ -97,7 +127,7 @@ fun ImportFlowScreen(
                         color = MaterialTheme.colorScheme.error,
                     )
                     Button(
-                        onClick = { picker.launch(arrayOf("video/*")) },
+                        onClick = { launchPicker() },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("重新选择") }
                 }
